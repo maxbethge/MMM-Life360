@@ -57,7 +57,7 @@ font size are all configurable.
 
 ```bash
 cd ~/MagicMirror/modules
-git clone https://github.com/yourname/MMM-Life360.git
+git clone https://github.com/maxbethge/MMM-Life360
 cd MMM-Life360
 npm install        # no runtime dependencies, but keeps things tidy
 ```
