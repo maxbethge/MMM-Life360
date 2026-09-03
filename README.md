@@ -117,6 +117,7 @@ Add the module to the `modules` array in `~/MagicMirror/config/config.js`:
 | `password`       | string  | `""`                                   | Life360 account password. |
 | `accessToken`    | string  | `""`                                   | Pre-obtained bearer token. Use instead of email/password. See [Getting an access token](#getting-an-access-token). |
 | `authToken`      | string  | community client token                 | The Basic auth client token used to exchange credentials for an access token. Override if Life360 changes it. |
+| `baseUrl`        | string  | `""`                                   | API host. `""` = `https://api.life360.com`. Try `https://api-cloudfront.life360.com` if that host 403s. |
 | `userAgent`      | string  | Android app UA                         | `User-Agent` sent on every request so it looks like the official mobile app. Bump the version if the shared token gets blocked. |
 | `useImpersonation` | boolean | `true`                               | Route requests through `cycletls` with a browser TLS fingerprint to defeat Cloudflare's JA3/JA4 blocking. Set `false` to force native `fetch` (likely 403s). |
 | `ja3`            | string  | `""`                                   | Override the TLS fingerprint (JA3 string). `""` = built-in modern-Chrome JA3. Change if the default gets blocked. |
@@ -313,15 +314,49 @@ can filter the MagicMirror logs easily:
 pm2 logs mm | grep MMM-Life360
 ```
 
+## Still getting 403s? Run the diagnostic
+
+Don't keep guessing — find out *which* 403 it is. From the module folder:
+
+```bash
+node diagnose.js
+```
+
+It tries the login across **both API hosts** (`api.life360.com` and
+`api-cloudfront.life360.com`) using **both transports** (cycletls and native
+fetch) and prints, for each, the status, the `Server` / `cf-ray` /
+`cf-mitigated` headers, and a body snippet — then a verdict:
+
+| Verdict | Meaning | What to do |
+|---------|---------|------------|
+| ✅ **SUCCESS** | That host+transport works | Set `baseUrl` to that host (and keep `useImpersonation: true` if cycletls won). |
+| ⛔ **CLOUDFLARE BLOCK** | TLS fingerprint rejected (HTML body, `cf-ray` present) | A token won't help. Try a different `ja3`, or capture a token from the app. |
+| 🔑 **LIFE360 REJECTED** | Got *through* Cloudflare; login refused (JSON body) | Check email/password and `authToken`; if the account has 2FA, use app capture. |
+| ⏳ **RATE LIMITED** | `429` | Increase `updateInterval` and wait before retrying. |
+
+This instantly tells you whether you have a **TLS problem** (Cloudflare) or a
+**credential problem** (Life360) — they need opposite fixes. The module logs the
+same diagnosis automatically on every failed request.
+
+The most common fixes, in order:
+
+1. **Switch `baseUrl`** — if the default `https://api.life360.com` 403s, try
+   `https://api-cloudfront.life360.com` (or vice-versa). Different hosts, different
+   Cloudflare rules.
+2. **Confirm cycletls is actually active** — the log should say
+   `TLS impersonation enabled (cycletls)`, *not* a fallback-to-fetch warning. If
+   it fell back, `npm install` didn't complete for your platform.
+3. **Try a different `ja3`** — Cloudflare may have blocked the built-in one.
+4. **Capture a token from the app** — bypasses both TLS and 2FA
+   ([Option B](#option-b--capture-a-token-from-the-real-app-most-reliable)).
+
 ## Troubleshooting
 
 - **`global fetch is unavailable`** — upgrade to Node 18 or newer.
-- **`403 Forbidden` (login or data)** — almost always
-  [Cloudflare TLS fingerprinting](#cloudflare-tls-fingerprinting-important), not
-  your IP or credentials. Make sure `npm install` ran successfully so `cycletls`
-  is present (check the log for `TLS impersonation enabled` vs. a fallback
-  warning). If the default JA3 is being blocked, try a different `ja3` value, or
-  capture a token from the app ([Getting an access token](#getting-an-access-token)).
+- **`403 Forbidden` (login or data)** — run `node diagnose.js` (above) to tell a
+  Cloudflare TLS block apart from a credential rejection. If it's Cloudflare,
+  make sure `npm install` ran so `cycletls` is present, try the other `baseUrl`,
+  or set a different `ja3`. If it's Life360, check credentials / 2FA.
 - **`access token is invalid, expired, or revoked …`** — your `accessToken` was
   revoked and there are no `email` + `password` to refresh it with. Grab a fresh
   token, or add credentials so the module can re-login automatically.

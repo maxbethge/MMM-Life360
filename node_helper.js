@@ -39,7 +39,10 @@ const fs = require("fs");
 const path = require("path");
 
 const MODULE_NAME = "MMM-Life360";
-const BASE_URL = "https://api-cloudfront.life360.com";
+// Two known API hosts. `api.life360.com` is the one the community library that
+// "just works" (pnbruckner/life360) uses; `api-cloudfront.life360.com` is more
+// aggressively fingerprint-guarded. Configurable via config.baseUrl.
+const DEFAULT_BASE_URL = "https://api.life360.com";
 const TOKEN_PATH = "/v3/oauth2/token";
 
 // Sensible defaults; all are overridable via config.
@@ -105,6 +108,10 @@ module.exports = NodeHelper.create({
 
   authToken() {
     return (this.config && this.config.authToken) || DEFAULT_AUTH_TOKEN;
+  },
+
+  baseUrl() {
+    return (this.config && this.config.baseUrl) || DEFAULT_BASE_URL;
   },
 
   ja3() {
@@ -223,6 +230,7 @@ module.exports = NodeHelper.create({
           ok: resp.status >= 200 && resp.status < 300,
           statusText: "",
           bodyText,
+          headers: resp.headers || {},
           transport: "cycletls"
         };
       } catch (e) {
@@ -237,11 +245,20 @@ module.exports = NodeHelper.create({
     // Native fetch fallback.
     const res = await fetch(url, { method, headers, body });
     const bodyText = await this.readText(res);
+    const hdrs = {};
+    try {
+      res.headers.forEach((v, k) => {
+        hdrs[k] = v;
+      });
+    } catch (e) {
+      /* ignore */
+    }
     return {
       status: res.status,
       ok: res.ok,
       statusText: res.statusText,
       bodyText,
+      headers: hdrs,
       transport: "fetch"
     };
   },
@@ -258,6 +275,65 @@ module.exports = NodeHelper.create({
   /** Trim a response body for inclusion in an error message. */
   snippet(text) {
     return text ? `- ${String(text).slice(0, 200)}` : "";
+  },
+
+  /** Case-insensitive header lookup on a normalised response. */
+  header(resp, name) {
+    const h = (resp && resp.headers) || {};
+    const want = name.toLowerCase();
+    for (const k of Object.keys(h)) {
+      if (k.toLowerCase() === want) {
+        return Array.isArray(h[k]) ? h[k].join(",") : h[k];
+      }
+    }
+    return "";
+  },
+
+  /**
+   * Work out WHY a request failed and log an actionable diagnosis. The key
+   * question on a 403 is "Cloudflare bot-block" vs "Life360 rejected the
+   * request", because they need opposite fixes.
+   */
+  diagnose(resp, context) {
+    const server = this.header(resp, "server");
+    const cfRay = this.header(resp, "cf-ray");
+    const cfMitigated = this.header(resp, "cf-mitigated");
+    const body = (resp.bodyText || "").toLowerCase();
+
+    const looksCloudflare =
+      /cloudflare/i.test(server) ||
+      !!cfRay ||
+      !!cfMitigated ||
+      body.includes("cloudflare") ||
+      body.includes("attention required") ||
+      body.includes("<!doctype html");
+
+    this.warn(
+      `${context}: HTTP ${resp.status} via ${resp.transport} ` +
+        `(server="${server || "?"}"${cfRay ? `, cf-ray=${cfRay}` : ""}` +
+        `${cfMitigated ? `, cf-mitigated=${cfMitigated}` : ""})`
+    );
+
+    if (resp.status === 403 && looksCloudflare) {
+      this.warn(
+        `${context}: this is a CLOUDFLARE block (TLS fingerprint), not a ` +
+          "credential problem. Things to try: (1) confirm cycletls is active " +
+          "in the log above, not a fetch fallback; (2) switch baseUrl to the " +
+          "other host; (3) set a different ja3; (4) capture a token from the " +
+          "Life360 app (README → Getting an access token)."
+      );
+    } else if (resp.status === 403) {
+      this.warn(
+        `${context}: 403 from Life360 (not Cloudflare) — usually bad ` +
+          "credentials, a stale authToken/client id, or 2FA on the account."
+      );
+    }
+
+    // Always show a short body snippet — it's the fastest way to tell HTML
+    // (Cloudflare) from JSON (Life360) at a glance.
+    if (resp.bodyText) {
+      this.warn(`${context}: body ${this.snippet(resp.bodyText)}`);
+    }
   },
 
   // --- token cache (disk) ---------------------------------------------------
@@ -447,7 +523,7 @@ module.exports = NodeHelper.create({
       password: this.config.password
     }).toString();
 
-    const resp = await this.httpRequest("POST", `${BASE_URL}${TOKEN_PATH}`, {
+    const resp = await this.httpRequest("POST", `${this.baseUrl()}${TOKEN_PATH}`, {
       headers: this.mobileHeaders({
         Authorization: `Basic ${this.authToken()}`,
         "Content-Type": "application/x-www-form-urlencoded"
@@ -456,16 +532,9 @@ module.exports = NodeHelper.create({
     });
 
     if (!resp.ok) {
-      let hint = "";
-      if (resp.status === 403) {
-        hint =
-          " — Life360/Cloudflare rejected this request. This is usually TLS " +
-          "fingerprinting: install cycletls (`npm install` in the module " +
-          "folder) so requests use a browser fingerprint, or grab an " +
-          "accessToken manually (see README → \"Getting an access token\").";
-      }
+      this.diagnose(resp, "login");
       const err = new Error(
-        `authentication failed (${resp.status} ${resp.statusText})${hint} ` +
+        `authentication failed (${resp.status} ${resp.statusText}) ` +
           `${this.snippet(resp.bodyText)}`
       );
       err.status = resp.status;
@@ -493,13 +562,14 @@ module.exports = NodeHelper.create({
 
   /** GET helper that attaches the bearer token and parses JSON. */
   async apiGet(apiPath) {
-    const resp = await this.httpRequest("GET", `${BASE_URL}${apiPath}`, {
+    const resp = await this.httpRequest("GET", `${this.baseUrl()}${apiPath}`, {
       headers: this.mobileHeaders({
         Authorization: `Bearer ${this.accessToken}`
       })
     });
 
     if (!resp.ok) {
+      this.diagnose(resp, `GET ${apiPath}`);
       const err = new Error(
         `request to ${apiPath} failed (${resp.status} ${resp.statusText}) ` +
           `${this.snippet(resp.bodyText)}`

@@ -33,6 +33,12 @@ Module.register("MMM-Life360", {
     // app. Bump the version if the shared token starts getting blocked.
     userAgent: "com.life360.android.safetymapd/KOKO/23.49.0 android/13",
 
+    // API host. "https://api.life360.com" is what the community library that
+    // reliably works uses; "https://api-cloudfront.life360.com" is the more
+    // fingerprint-guarded alternative. If one host 403s, try the other — run
+    // `node diagnose.js` to see which host+transport actually gets through.
+    baseUrl: "", // "" = https://api.life360.com
+
     // TLS impersonation. Life360 sits behind Cloudflare, which fingerprints
     // the TLS handshake (JA3/JA4) and returns 403 to Node's built-in fetch and
     // curl regardless of headers/IP. When true (default) requests are routed

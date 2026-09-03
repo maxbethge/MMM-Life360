@@ -17,7 +17,8 @@
     "mmm-life360-get-token": "get-token.js"
   },
   "scripts": {
-    "get-token": "node get-token.js"
+    "get-token": "node get-token.js",
+    "diagnose": "node diagnose.js"
   },
   "engines": {
     "node": ">=18.0.0"
