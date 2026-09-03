@@ -8,6 +8,17 @@
  *   3. Fetches the members (with locations) for each circle.
  *   4. Normalises the data and sends it back to the browser module.
  *
+ * Cloudflare TLS fingerprinting (why we don't just use fetch)
+ * ----------------------------------------------------------
+ * Life360's API sits behind Cloudflare, which fingerprints the TLS ClientHello
+ * (JA3/JA4). Requests from Node's built-in fetch / undici (and plain curl) are
+ * frequently rejected with HTTP 403 *regardless* of headers, payload or IP —
+ * see pnbruckner/life360#22 and pnbruckner/ha-life360#84 & #99. To look like a
+ * real browser at the TLS layer we route requests through `cycletls` (a Go TLS
+ * client with a configurable JA3). If cycletls can't be loaded we fall back to
+ * native fetch with a clear warning — the module keeps working wherever fetch
+ * happens to be accepted.
+ *
  * Token handling
  * --------------
  * Life360's OAuth "password" grant returns ONLY an access_token — there is no
@@ -15,19 +26,13 @@
  * revoked server-side), so there is no background "refresh" flow possible; the
  * only way to obtain a new token is to log in again with the password.
  *
- * To keep logins to a minimum (repeated logins are what trigger Life360's
- * Cloudflare 403s) the helper:
- *   - caches a working token to disk and reuses it across restarts;
- *   - only logs in when it has no usable token;
- *   - on a 401 (token rejected) it re-logs-in automatically IF email+password
- *     are configured, otherwise it surfaces a clear "grab a new token" message.
- *
- * All API calls send mobile-app-style headers (User-Agent + cache-control) so
- * the request looks like it comes from the official app.
+ * To keep logins to a minimum (repeated logins are a common 403 trigger) the
+ * helper caches a working token to disk, reuses it across restarts, and only
+ * re-logs-in on a 401 when email + password are configured.
  *
  * All log lines are prefixed with the module name.
  *
- * Requires Node 18+ (uses the global fetch API).
+ * Requires Node 18+ (uses the global fetch API as a fallback transport).
  */
 const NodeHelper = require("node_helper");
 const fs = require("fs");
@@ -37,11 +42,16 @@ const MODULE_NAME = "MMM-Life360";
 const BASE_URL = "https://api-cloudfront.life360.com";
 const TOKEN_PATH = "/v3/oauth2/token";
 
-// Sensible defaults; both are overridable via config.
+// Sensible defaults; all are overridable via config.
 const DEFAULT_USER_AGENT =
   "com.life360.android.safetymapd/KOKO/23.49.0 android/13";
 const DEFAULT_AUTH_TOKEN =
   "cSgLxOgW7Jm7AbNa16Ki7lhCUcUhCz2Uv6EWt66zBrIZ0Wz7DKZ0lStY1vAP1nA7EObZ8i";
+// A modern Chrome JA3. Cloudflare readily accepts browser ClientHellos, whereas
+// Node/undici and curl fingerprints are often blocked. Tunable via config.ja3
+// if Life360 starts blocking this one too.
+const DEFAULT_JA3 =
+  "771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0";
 
 module.exports = NodeHelper.create({
   start() {
@@ -50,7 +60,24 @@ module.exports = NodeHelper.create({
     this.deadToken = null; // a token we know is bad and cannot refresh
     this.config = null;
     this.busy = false;
+
+    // TLS-impersonation client (cycletls) lifecycle.
+    this.cycleClient = null;
+    this.cycleInitPromise = null;
+    this.cycleFailed = false; // give up on cycletls after a hard failure
+
     this.log("node_helper started");
+  },
+
+  /** Best-effort cleanup of the cycletls Go process on shutdown. */
+  stop() {
+    if (this.cycleClient && typeof this.cycleClient.exit === "function") {
+      try {
+        this.cycleClient.exit();
+      } catch (e) {
+        /* ignore */
+      }
+    }
   },
 
   // --- logging helpers (always include the module name) ---------------------
@@ -80,12 +107,20 @@ module.exports = NodeHelper.create({
     return (this.config && this.config.authToken) || DEFAULT_AUTH_TOKEN;
   },
 
+  ja3() {
+    return (this.config && this.config.ja3) || DEFAULT_JA3;
+  },
+
+  useImpersonation() {
+    // On by default; set useImpersonation:false to force native fetch.
+    return !this.config || this.config.useImpersonation !== false;
+  },
+
   canLogin() {
     return !!(this.config && this.config.email && this.config.password);
   },
 
   cacheEnabled() {
-    // Caching is on by default; set cacheToken:false to disable.
     return !this.config || this.config.cacheToken !== false;
   },
 
@@ -106,6 +141,123 @@ module.exports = NodeHelper.create({
       },
       extra || {}
     );
+  },
+
+  // --- HTTP transport -------------------------------------------------------
+  /**
+   * Lazily initialise the cycletls client. Returns null (and remembers the
+   * failure) if the package isn't installed or the Go process won't start, so
+   * callers transparently fall back to native fetch.
+   */
+  async getCycleClient() {
+    if (!this.useImpersonation() || this.cycleFailed) {
+      return null;
+    }
+    if (this.cycleClient) {
+      return this.cycleClient;
+    }
+    if (!this.cycleInitPromise) {
+      this.cycleInitPromise = (async () => {
+        let initCycleTLS;
+        try {
+          initCycleTLS = require("cycletls");
+        } catch (e) {
+          this.warn(
+            "cycletls is not installed — run `npm install` in the module " +
+              "folder to enable TLS impersonation (recommended to avoid " +
+              "Life360's Cloudflare 403s). Falling back to native fetch."
+          );
+          this.cycleFailed = true;
+          return null;
+        }
+        try {
+          const client = await initCycleTLS();
+          this.cycleClient = client;
+          this.log("TLS impersonation enabled (cycletls)");
+          return client;
+        } catch (e) {
+          this.warn(
+            `could not start cycletls (${e.message}); falling back to native fetch`
+          );
+          this.cycleFailed = true;
+          return null;
+        }
+      })();
+    }
+    return this.cycleInitPromise;
+  },
+
+  /**
+   * Perform an HTTP request via cycletls (preferred) or native fetch.
+   * Returns a normalised { status, ok, statusText, bodyText, transport }.
+   */
+  async httpRequest(method, url, opts) {
+    const options = opts || {};
+    const headers = options.headers || {};
+    const body = options.body;
+
+    const client = await this.getCycleClient();
+    if (client) {
+      try {
+        const resp = await client(
+          url,
+          {
+            body: body || "",
+            headers,
+            ja3: this.ja3(),
+            userAgent: headers["User-Agent"] || this.userAgent(),
+            timeout: 30,
+            disableRedirect: false
+          },
+          method.toLowerCase()
+        );
+
+        // cycletls returns body as a string, or a parsed object for JSON.
+        const bodyText =
+          typeof resp.body === "string"
+            ? resp.body
+            : JSON.stringify(resp.body);
+
+        return {
+          status: resp.status,
+          ok: resp.status >= 200 && resp.status < 300,
+          statusText: "",
+          bodyText,
+          transport: "cycletls"
+        };
+      } catch (e) {
+        // A transport-level failure (not an HTTP error) — try fetch as a
+        // last resort rather than failing the whole poll.
+        this.warn(
+          `cycletls request failed (${e.message}); retrying with native fetch`
+        );
+      }
+    }
+
+    // Native fetch fallback.
+    const res = await fetch(url, { method, headers, body });
+    const bodyText = await this.readText(res);
+    return {
+      status: res.status,
+      ok: res.ok,
+      statusText: res.statusText,
+      bodyText,
+      transport: "fetch"
+    };
+  },
+
+  /** Read a fetch response body as text without throwing. */
+  async readText(res) {
+    try {
+      return await res.text();
+    } catch (e) {
+      return "";
+    }
+  },
+
+  /** Trim a response body for inclusion in an error message. */
+  snippet(text) {
+    return text ? `- ${String(text).slice(0, 200)}` : "";
   },
 
   // --- token cache (disk) ---------------------------------------------------
@@ -133,7 +285,6 @@ module.exports = NodeHelper.create({
         JSON.stringify({ access_token: token, savedAt: new Date().toISOString() }),
         { mode: 0o600 }
       );
-      // Ensure restrictive perms even if the file already existed.
       try {
         fs.chmodSync(file, 0o600);
       } catch (e) {
@@ -276,7 +427,6 @@ module.exports = NodeHelper.create({
 
     // Need a fresh token via password login.
     if (!this.canLogin()) {
-      // We had a token source that just failed, or none was ever provided.
       throw this.config && this.config.accessToken
         ? this.expiredTokenError()
         : new Error(
@@ -295,10 +445,9 @@ module.exports = NodeHelper.create({
       grant_type: "password",
       username: this.config.email,
       password: this.config.password
-    });
+    }).toString();
 
-    const res = await fetch(`${BASE_URL}${TOKEN_PATH}`, {
-      method: "POST",
+    const resp = await this.httpRequest("POST", `${BASE_URL}${TOKEN_PATH}`, {
       headers: this.mobileHeaders({
         Authorization: `Basic ${this.authToken()}`,
         "Content-Type": "application/x-www-form-urlencoded"
@@ -306,23 +455,31 @@ module.exports = NodeHelper.create({
       body
     });
 
-    if (!res.ok) {
-      const text = await this.safeText(res);
+    if (!resp.ok) {
       let hint = "";
-      if (res.status === 403) {
+      if (resp.status === 403) {
         hint =
-          " — Life360 is blocking this login (Cloudflare bot-protection, " +
-          "2FA, or a datacenter/VPN IP). Grab an accessToken manually instead " +
-          "(see README → \"Getting an access token\").";
+          " — Life360/Cloudflare rejected this request. This is usually TLS " +
+          "fingerprinting: install cycletls (`npm install` in the module " +
+          "folder) so requests use a browser fingerprint, or grab an " +
+          "accessToken manually (see README → \"Getting an access token\").";
       }
       const err = new Error(
-        `authentication failed (${res.status} ${res.statusText})${hint} ${text}`
+        `authentication failed (${resp.status} ${resp.statusText})${hint} ` +
+          `${this.snippet(resp.bodyText)}`
       );
-      err.status = res.status;
+      err.status = resp.status;
       throw err;
     }
 
-    const data = await res.json();
+    let data;
+    try {
+      data = JSON.parse(resp.bodyText);
+    } catch (e) {
+      throw new Error(
+        `could not parse token response: ${this.snippet(resp.bodyText)}`
+      );
+    }
     if (!data.access_token) {
       throw new Error("authentication succeeded but no access_token returned");
     }
@@ -331,27 +488,33 @@ module.exports = NodeHelper.create({
     this.tokenSource = "login";
     this.deadToken = null;
     this.saveCachedToken(this.accessToken);
-    this.log("authentication successful");
+    this.log(`authentication successful (via ${resp.transport})`);
   },
 
   /** GET helper that attaches the bearer token and parses JSON. */
-  async apiGet(path) {
-    const res = await fetch(`${BASE_URL}${path}`, {
-      method: "GET",
+  async apiGet(apiPath) {
+    const resp = await this.httpRequest("GET", `${BASE_URL}${apiPath}`, {
       headers: this.mobileHeaders({
         Authorization: `Bearer ${this.accessToken}`
       })
     });
 
-    if (!res.ok) {
-      const text = await this.safeText(res);
+    if (!resp.ok) {
       const err = new Error(
-        `request to ${path} failed (${res.status} ${res.statusText}) ${text}`
+        `request to ${apiPath} failed (${resp.status} ${resp.statusText}) ` +
+          `${this.snippet(resp.bodyText)}`
       );
-      err.status = res.status;
+      err.status = resp.status;
       throw err;
     }
-    return res.json();
+
+    try {
+      return JSON.parse(resp.bodyText);
+    } catch (e) {
+      throw new Error(
+        `could not parse response from ${apiPath}: ${this.snippet(resp.bodyText)}`
+      );
+    }
   },
 
   /** Fetch circles, honouring an optional configured circleId filter. */
@@ -433,15 +596,5 @@ module.exports = NodeHelper.create({
       speed: toNum(loc.speed),
       timestamp: toNum(loc.timestamp)
     };
-  },
-
-  /** Read a response body as text without throwing. */
-  async safeText(res) {
-    try {
-      const t = await res.text();
-      return t ? `- ${t.slice(0, 200)}` : "";
-    } catch (e) {
-      return "";
-    }
   }
 });

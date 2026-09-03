@@ -33,6 +33,14 @@ Module.register("MMM-Life360", {
     // app. Bump the version if the shared token starts getting blocked.
     userAgent: "com.life360.android.safetymapd/KOKO/23.49.0 android/13",
 
+    // TLS impersonation. Life360 sits behind Cloudflare, which fingerprints
+    // the TLS handshake (JA3/JA4) and returns 403 to Node's built-in fetch and
+    // curl regardless of headers/IP. When true (default) requests are routed
+    // through cycletls with a browser-like fingerprint. Set false to force
+    // native fetch. `ja3` overrides the fingerprint if this one gets blocked.
+    useImpersonation: true,
+    ja3: "", // "" = use the built-in modern-Chrome JA3
+
     // Token caching: persist a working token to disk so the module reuses it
     // across restarts instead of logging in every time (repeated logins are
     // what trigger Life360's 403s). Life360 issues no refresh token, so the

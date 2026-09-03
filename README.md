@@ -44,13 +44,16 @@ font size are all configurable.
 - 🔄 Configurable refresh schedule
 - 📐 Configurable module size, map size and font size
 - 🔐 Log in with email/password, or supply a pre-obtained access token
+- 🛡️ Defeats Life360's Cloudflare TLS-fingerprint (JA3) `403`s via `cycletls`
+- 💾 Caches the access token to disk and re-logs-in automatically on expiry
+- 🛠️ Bundled `get-token.js` helper to grab a token when logins are blocked
 - 🪵 All log lines are prefixed with the module name (`[MMM-Life360]`) on both
   the browser and server side
 
 ## Requirements
 
 - MagicMirror² `>= 2.1.0`
-- Node.js `>= 18` (the server-side helper uses the built-in `fetch` API)
+- Node.js `>= 18`
 - A Life360 account
 
 ## Installation
@@ -59,8 +62,15 @@ font size are all configurable.
 cd ~/MagicMirror/modules
 git clone https://github.com/maxbethge/MMM-Life360
 cd MMM-Life360
-npm install        # no runtime dependencies, but keeps things tidy
+npm install        # installs cycletls — see "Cloudflare TLS fingerprinting"
 ```
+
+**Run `npm install`** — it is not optional. It installs [`cycletls`](https://github.com/Danny-Dasilva/CycleTLS),
+which lets the module present a browser-like TLS fingerprint. Without it,
+Life360's Cloudflare frontend will very likely reject requests with **HTTP 403**
+(see [Cloudflare TLS fingerprinting](#cloudflare-tls-fingerprinting-important)).
+`cycletls` ships prebuilt Go binaries for Linux (x64 / **arm64 / armv7**, so
+Raspberry Pi works), macOS and Windows.
 
 Leaflet (used for the map) is loaded automatically from a CDN, so an internet
 connection is required for the map tiles.
@@ -105,8 +115,13 @@ Add the module to the `modules` array in `~/MagicMirror/config/config.js`:
 |------------------|---------|----------------------------------------|-------------|
 | `email`          | string  | `""`                                   | Life360 account email. |
 | `password`       | string  | `""`                                   | Life360 account password. |
-| `accessToken`    | string  | `""`                                   | Pre-obtained bearer token. Use instead of email/password. |
+| `accessToken`    | string  | `""`                                   | Pre-obtained bearer token. Use instead of email/password. See [Getting an access token](#getting-an-access-token). |
 | `authToken`      | string  | community client token                 | The Basic auth client token used to exchange credentials for an access token. Override if Life360 changes it. |
+| `userAgent`      | string  | Android app UA                         | `User-Agent` sent on every request so it looks like the official mobile app. Bump the version if the shared token gets blocked. |
+| `useImpersonation` | boolean | `true`                               | Route requests through `cycletls` with a browser TLS fingerprint to defeat Cloudflare's JA3/JA4 blocking. Set `false` to force native `fetch` (likely 403s). |
+| `ja3`            | string  | `""`                                   | Override the TLS fingerprint (JA3 string). `""` = built-in modern-Chrome JA3. Change if the default gets blocked. |
+| `cacheToken`     | boolean | `true`                                 | Persist a working token to disk and reuse it across restarts (fewer logins = fewer 403s). |
+| `tokenCachePath` | string  | `""`                                   | Where to store the cached token. `""` = `<module dir>/.life360-token.json`. |
 | `circleId`       | string  | `""`                                   | Restrict to a single circle. Empty = all circles you belong to. |
 | `updateInterval` | number  | `60000`                                | Refresh interval in ms (minimum 10 s enforced). |
 | `retryDelay`     | number  | `15000`                                | Reserved for retry backoff (ms). |
@@ -128,23 +143,166 @@ Add the module to the `modules` array in `~/MagicMirror/config/config.js`:
 | `mapAttribution` | string  | OSM attribution                        | Map attribution text. |
 | `maxMembers`     | number  | `0`                                    | Limit the number of members shown (0 = all). |
 
+## Cloudflare TLS fingerprinting (important)
+
+The single most common reason people can't talk to the Life360 API — from
+**any** tool — is a **persistent `403 Forbidden` from Cloudflare** that has
+nothing to do with your credentials, headers, payload, or IP address.
+
+Life360's API is fronted by Cloudflare, which **fingerprints the TLS
+handshake** (JA3 / JA4). Requests made with Node's built-in `fetch`/undici, and
+with plain `curl`, present a fingerprint Cloudflare frequently blocks —
+*regardless* of a valid `User-Agent`, auth token or residential IP. Requests
+that use a browser-like TLS stack (or OpenSSL, as some client libraries do) are
+allowed through. This is documented in the community:
+
+- [`pnbruckner/life360` #22 — "403 Errors - Caused by handshake fingerprinting"](https://github.com/pnbruckner/life360/issues/22)
+  (the original report; note the maintainer did not technically confirm it)
+- [`pnbruckner/ha-life360` #84](https://github.com/pnbruckner/ha-life360/issues/84)
+  — a **valid bearer token** still got `403` on the `/circles` *data* endpoint,
+  showing the block is not limited to login
+- [`pnbruckner/ha-life360` #99](https://github.com/pnbruckner/ha-life360/pull/99)
+  — a merged fix proving Cloudflare gates on TLS/ALPN characteristics
+
+**How this module deals with it:** by default (`useImpersonation: true`) every
+request — both login *and* data calls — is routed through
+[`cycletls`](https://github.com/Danny-Dasilva/CycleTLS), which performs the TLS
+handshake with a configurable browser fingerprint (a modern Chrome JA3 by
+default). This is why `npm install` is required.
+
+- If `cycletls` isn't installed or its binary can't start, the module logs a
+  warning and **falls back to native `fetch`** — it will still work if Cloudflare
+  happens to accept your fetch fingerprint, but many setups will see `403`.
+- If Cloudflare starts blocking the built-in JA3, set a different one via the
+  `ja3` config option.
+- You can force the old behaviour with `useImpersonation: false`.
+
+> **Honesty note:** the JA3/JA4 explanation is well-supported but not officially
+> confirmed by Life360 (there is no official API). If impersonation stops
+> working, capturing a token from the app (Option C below) is the fallback that
+> always works.
+
 ## How authentication works
 
-On each refresh the server-side helper (`node_helper.js`):
+On each refresh the server-side helper (`node_helper.js`) makes sure it has a
+usable token, preferring cheap sources first:
 
-1. Uses `accessToken` from config if provided; otherwise exchanges your
-   `email` + `password` for an access token via Life360's OAuth token endpoint.
-2. Fetches the circles on the account (filtered by `circleId` if set).
-3. Fetches the members (with locations) for each circle and merges them.
-4. Sends a normalised list back to the browser module.
+1. **In-memory token** from this session, if any.
+2. **Cached token** on disk (`.life360-token.json`), if `cacheToken` is on.
+3. **`accessToken`** from config, if provided.
+4. Otherwise **log in** by exchanging your `email` + `password` for a token via
+   Life360's OAuth token endpoint, then cache the result.
 
-If the token is rejected (HTTP 401) it is discarded and re-requested on the next
-tick.
+It then fetches your circles (filtered by `circleId` if set), fetches the
+members with locations for each, merges them, and sends a normalised list to the
+browser module.
+
+### Token lifetime & "refresh"
+
+**Life360 does not issue a refresh token.** Its `password` grant returns only an
+`access_token` — there is no `refresh_token` and no `expires_in` field. The
+token is **long-lived**: it stays valid until it is revoked server-side (e.g. you
+log out elsewhere or Life360 invalidates it). There is therefore no lightweight
+background "refresh" possible — the *only* way to obtain a new token is to log in
+again with the password.
+
+The module handles this as gracefully as the API allows:
+
+- **Token caching** (on by default) writes a working token to
+  `.life360-token.json` (mode `600`) so restarts reuse it instead of logging in
+  again. Fewer logins means far fewer Cloudflare `403`s.
+- **Auto re-login on 401.** If a request comes back `401` (token rejected), the
+  module discards the token and, **if `email` + `password` are configured**, logs
+  in again automatically and retries — all in the background.
+- **Token-only setups** (no credentials) can't self-heal, because there's
+  nothing to log in with. When such a token is finally revoked, the module stops
+  retrying it and shows a clear message telling you to supply a fresh
+  `accessToken` (or add credentials). Grab a new one as below.
 
 > **Note:** Life360 has no official public API. This module uses the
 > long-standing community client token. If Life360 changes it and login starts
-> failing, either update the `authToken` option or supply an `accessToken`
-> directly.
+> failing, either update the `authToken` / `userAgent` options or supply an
+> `accessToken` directly.
+
+## Getting an access token
+
+If login is failing, work through these in order. The bundled helper uses the
+same TLS impersonation as the module, so it's the most likely to succeed.
+
+> A `403` here is almost always [Cloudflare TLS fingerprinting](#cloudflare-tls-fingerprinting-important),
+> **not** your IP or credentials. Moving to a "residential" connection does *not*
+> help — the TLS stack is what matters.
+
+### Option A — the bundled helper script (easiest)
+
+From the module folder (after `npm install`, so `cycletls` is available):
+
+```bash
+node get-token.js
+# or:  node get-token.js you@example.com
+# or non-interactively:
+LIFE360_EMAIL="you@example.com" LIFE360_PASSWORD="secret" node get-token.js
+```
+
+The helper tries `cycletls` first and falls back to `fetch`, logging which
+transport it used. It prints an access token — copy it into your config:
+
+```js
+config: {
+  accessToken: "PASTE_THE_TOKEN_HERE",
+  updateInterval: 60 * 1000
+}
+```
+
+Add `--save` to also write the token straight into the module's cache file, so
+the module picks it up with no config edit:
+
+```bash
+node get-token.js --save
+```
+
+### Option B — capture a token from the real app (most reliable)
+
+If the helper still `403`s (e.g. the JA3 got blocked, or the account uses 2FA),
+grab a token that the official client already obtained — this bypasses both the
+fingerprinting and 2FA:
+
+1. Put an intercepting proxy in front of your phone — [HTTP Toolkit](https://httptoolkit.com/)
+   is the easiest, or use mitmproxy / Charles.
+2. Open the Life360 app and let it load your family.
+3. Find any request to `api-cloudfront.life360.com` (e.g. `/v3/circles`).
+4. In its request headers, copy the value after `Authorization: Bearer ` — that
+   string is your `accessToken`.
+
+> Even with a captured token, the module still needs `cycletls` for its *data*
+> requests — a valid token alone does not get past the fingerprint block
+> ([#84](https://github.com/pnbruckner/ha-life360/issues/84)).
+>
+> A token obtained this way won't refresh itself (see
+> [Token lifetime](#token-lifetime--refresh)). When it's revoked, repeat the
+> capture, or add `email` + `password` for hands-off renewal.
+
+### Option C — plain `curl` (usually blocked)
+
+For completeness only. `curl`'s TLS fingerprint is one of the ones Cloudflare
+tends to block, so this **often returns `403`** — but it's occasionally useful
+for a quick test:
+
+```bash
+curl -s -X POST 'https://api-cloudfront.life360.com/v3/oauth2/token' \
+  -H 'Authorization: Basic cSgLxOgW7Jm7AbNa16Ki7lhCUcUhCz2Uv6EWt66zBrIZ0Wz7DKZ0lStY1vAP1nA7EObZ8i' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -H 'Accept: application/json' \
+  -H 'cache-control: no-cache' \
+  -H 'User-Agent: com.life360.android.safetymapd/KOKO/23.49.0 android/13' \
+  --data-urlencode 'grant_type=password' \
+  --data-urlencode 'username=YOUR_EMAIL' \
+  --data-urlencode 'password=YOUR_PASSWORD'
+```
+
+If it works, the JSON response contains `"access_token": "…"`. If it `403`s, use
+Option A or B. (`curl-impersonate` mimics a browser fingerprint and works where
+stock `curl` fails.)
 
 ## Logging
 
@@ -158,8 +316,17 @@ pm2 logs mm | grep MMM-Life360
 ## Troubleshooting
 
 - **`global fetch is unavailable`** — upgrade to Node 18 or newer.
-- **`authentication failed (403 …)`** — Life360 may be challenging the login;
-  try again later or obtain an `accessToken` manually and set it in config.
+- **`403 Forbidden` (login or data)** — almost always
+  [Cloudflare TLS fingerprinting](#cloudflare-tls-fingerprinting-important), not
+  your IP or credentials. Make sure `npm install` ran successfully so `cycletls`
+  is present (check the log for `TLS impersonation enabled` vs. a fallback
+  warning). If the default JA3 is being blocked, try a different `ja3` value, or
+  capture a token from the app ([Getting an access token](#getting-an-access-token)).
+- **`access token is invalid, expired, or revoked …`** — your `accessToken` was
+  revoked and there are no `email` + `password` to refresh it with. Grab a fresh
+  token, or add credentials so the module can re-login automatically.
+- **Stale data / repeated logins** — make sure `cacheToken` is enabled (default)
+  and that `.life360-token.json` is writable by the MagicMirror user.
 - **Map is blank** — check the Pi has internet access for the map tiles, or
   point `mapTileUrl` at a reachable tile server.
 

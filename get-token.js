@@ -33,6 +33,11 @@ const USER_AGENT = "com.life360.android.safetymapd/KOKO/23.49.0 android/13";
 const AUTH_TOKEN =
   process.env.LIFE360_AUTH_TOKEN ||
   "cSgLxOgW7Jm7AbNa16Ki7lhCUcUhCz2Uv6EWt66zBrIZ0Wz7DKZ0lStY1vAP1nA7EObZ8i";
+// A modern Chrome JA3 so Cloudflare sees a browser-like TLS fingerprint.
+// Node's built-in fetch/undici fingerprint is frequently blocked with 403.
+const JA3 =
+  process.env.LIFE360_JA3 ||
+  "771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0";
 
 const CACHE_FILE = path.join(__dirname, ".life360-token.json");
 
@@ -75,42 +80,107 @@ function prompt(question, { mask = false } = {}) {
   });
 }
 
-async function login(email, password) {
+/**
+ * POST the password grant. Prefer cycletls (browser TLS fingerprint) so
+ * Cloudflare doesn't 403 us; fall back to native fetch if cycletls isn't
+ * installed. Returns { status, statusText, bodyText, transport }.
+ */
+async function postToken(bodyString) {
+  const headers = {
+    Authorization: `Basic ${AUTH_TOKEN}`,
+    "Content-Type": "application/x-www-form-urlencoded",
+    Accept: "application/json",
+    "cache-control": "no-cache",
+    "User-Agent": USER_AGENT
+  };
+
+  // Try cycletls first.
+  let initCycleTLS = null;
+  try {
+    initCycleTLS = require("cycletls");
+  } catch (e) {
+    log(
+      "cycletls not installed — using native fetch (more likely to hit a " +
+        "Cloudflare 403). Run `npm install` in the module folder to enable it."
+    );
+  }
+
+  if (initCycleTLS) {
+    let client;
+    try {
+      client = await initCycleTLS();
+      const resp = await client(
+        `${BASE_URL}${TOKEN_PATH}`,
+        {
+          body: bodyString,
+          headers,
+          ja3: JA3,
+          userAgent: USER_AGENT,
+          timeout: 30
+        },
+        "post"
+      );
+      const bodyText =
+        typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body);
+      return {
+        status: resp.status,
+        statusText: "",
+        bodyText,
+        transport: "cycletls"
+      };
+    } catch (e) {
+      log(`cycletls request failed (${e.message}); falling back to fetch`);
+    } finally {
+      if (client && typeof client.exit === "function") {
+        try {
+          client.exit();
+        } catch (e) {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  // Native fetch fallback.
   if (typeof fetch !== "function") {
     throw new Error("global fetch is unavailable — Node 18+ is required");
   }
+  const res = await fetch(`${BASE_URL}${TOKEN_PATH}`, {
+    method: "POST",
+    headers,
+    body: bodyString
+  });
+  return {
+    status: res.status,
+    statusText: res.statusText,
+    bodyText: await res.text(),
+    transport: "fetch"
+  };
+}
 
+async function login(email, password) {
   log("authenticating with Life360 (password grant)…");
-  const body = new URLSearchParams({
+  const bodyString = new URLSearchParams({
     grant_type: "password",
     username: email,
     password
-  });
+  }).toString();
 
-  const res = await fetch(`${BASE_URL}${TOKEN_PATH}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${AUTH_TOKEN}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
-      "cache-control": "no-cache",
-      "User-Agent": USER_AGENT
-    },
-    body
-  });
+  const resp = await postToken(bodyString);
+  const ok = resp.status >= 200 && resp.status < 300;
 
-  const text = await res.text();
-  if (!res.ok) {
+  if (!ok) {
     let hint = "";
-    if (res.status === 403) {
+    if (resp.status === 403) {
       hint =
-        "\n  → 403 usually means Cloudflare bot-protection, 2FA on the " +
-        "account, or a datacenter/VPN IP.\n" +
-        "    Try from a residential connection, or capture a token from the " +
-        "app (see README).";
+        "\n  → 403 is usually Cloudflare TLS fingerprinting (Node/curl stacks " +
+        "are blocked), 2FA on the account, or bot-protection.\n" +
+        `    This attempt used the "${resp.transport}" transport. If that was ` +
+        "'fetch', run `npm install` to enable cycletls and retry.\n" +
+        "    Otherwise capture a token from the Life360 app (see README).";
     }
     throw new Error(
-      `authentication failed (${res.status} ${res.statusText})${hint}\n  ${text.slice(
+      `authentication failed (${resp.status} ${resp.statusText})${hint}\n  ${resp.bodyText.slice(
         0,
         300
       )}`
@@ -119,13 +189,14 @@ async function login(email, password) {
 
   let data;
   try {
-    data = JSON.parse(text);
+    data = JSON.parse(resp.bodyText);
   } catch (e) {
-    throw new Error(`could not parse token response: ${text.slice(0, 200)}`);
+    throw new Error(`could not parse token response: ${resp.bodyText.slice(0, 200)}`);
   }
   if (!data.access_token) {
     throw new Error("authentication succeeded but no access_token was returned");
   }
+  log(`token obtained via ${resp.transport}`);
   return data.access_token;
 }
 

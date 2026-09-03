@@ -13,6 +13,12 @@
   ],
   "license": "MIT",
   "main": "MMM-Life360.js",
+  "bin": {
+    "mmm-life360-get-token": "get-token.js"
+  },
+  "scripts": {
+    "get-token": "node get-token.js"
+  },
   "engines": {
     "node": ">=18.0.0"
   },
@@ -20,5 +26,7 @@
     "type": "git",
     "url": "https://github.com/yourname/MMM-Life360.git"
   },
-  "dependencies": {}
+  "dependencies": {
+    "cycletls": "^2.0.5"
+  }
 }

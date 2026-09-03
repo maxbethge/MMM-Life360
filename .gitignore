@@ -2,3 +2,6 @@ node_modules/
 npm-debug.log*
 .DS_Store
 *.log
+
+# Cached Life360 access token (contains a live credential — never commit)
+.life360-token.json
