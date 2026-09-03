@@ -14,10 +14,17 @@
  *
  * Nothing here is written to disk and no token is printed in full.
  *
- * Usage:
+ * Usage (login probe):
  *   node diagnose.js                      # prompts for email + password
  *   node diagnose.js you@example.com
  *   LIFE360_EMAIL=... LIFE360_PASSWORD=... node diagnose.js
+ *
+ * Usage (token test — for accounts that sign in with an emailed code, i.e.
+ * no password login is possible; capture a bearer token from the app first):
+ *   node diagnose.js --token              # prompts for the token
+ *   LIFE360_TOKEN=... node diagnose.js
+ * This GETs the real /v3/circles data endpoint to prove the token works
+ * end-to-end before you put it in config.
  *
  * Requires Node 18+.
  */
@@ -170,6 +177,97 @@ async function tryFetch(host, bodyString, headers) {
   }
 }
 
+// --- token-test mode: GET a data endpoint with a captured bearer token -----
+async function getCycle(host, path, headers) {
+  let initCycleTLS;
+  try {
+    initCycleTLS = require("cycletls");
+  } catch (e) {
+    return { skipped: "cycletls not installed (run `npm install`)" };
+  }
+  let client;
+  try {
+    client = await initCycleTLS();
+    const resp = await client(
+      `${host}${path}`,
+      { headers, ja3: JA3, userAgent: USER_AGENT, timeout: 30 },
+      "get"
+    );
+    const bodyText =
+      typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body);
+    return { status: resp.status, headers: resp.headers || {}, bodyText };
+  } catch (e) {
+    return { error: e.message };
+  } finally {
+    if (client && typeof client.exit === "function") {
+      try {
+        client.exit();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+}
+
+async function getFetch(host, path, headers) {
+  if (typeof fetch !== "function") {
+    return { skipped: "global fetch unavailable (need Node 18+)" };
+  }
+  try {
+    const res = await fetch(`${host}${path}`, { method: "GET", headers });
+    const bodyText = await res.text();
+    const hdrs = {};
+    res.headers.forEach((v, k) => {
+      hdrs[k] = v;
+    });
+    return { status: res.status, headers: hdrs, bodyText };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function testToken(token) {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+    "cache-control": "no-cache",
+    "User-Agent": USER_AGENT
+  };
+  const path = "/v3/circles";
+
+  log("Testing your captured token against the /v3/circles DATA endpoint…");
+  log("(this is what the module actually calls on every refresh)");
+
+  let winner = null;
+  for (const host of HOSTS) {
+    const c = await getCycle(host, path, headers);
+    if (report(`cycletls  →  ${host}${path}`, c)) {
+      winner = { host, transport: "cycletls" };
+    }
+    const f = await getFetch(host, path, headers);
+    if (report(`fetch     →  ${host}${path}`, f)) {
+      winner = winner || { host, transport: "fetch" };
+    }
+  }
+
+  log("");
+  log("──────────── SUMMARY ────────────");
+  if (winner) {
+    log("✅ Your captured token WORKS for data requests. In config.js set:");
+    log(`   accessToken: "<your token>"`);
+    log(`   baseUrl: "${winner.host}"`);
+    log(
+      `   useImpersonation: ${winner.transport === "cycletls" ? "true" : "false"}`
+    );
+    log("   (leave email/password unset — this account can't password-login)");
+    log("Then restart MagicMirror. Re-run this when the token expires.");
+  } else {
+    log("The token did not work on any host/transport. Either it's already");
+    log("expired (grab a fresh one from the app) or the data endpoints are");
+    log("Cloudflare-blocked for your setup too — see the verdicts above.");
+  }
+}
+
 function report(label, result) {
   log("");
   log(`── ${label} ─────────────────────────────`);
@@ -192,14 +290,37 @@ function report(label, result) {
 }
 
 async function main() {
-  const args = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+  const argv = process.argv.slice(2);
+  const flags = argv.filter((a) => a.startsWith("--"));
+  const args = argv.filter((a) => !a.startsWith("--"));
+
+  // Token-test mode: `node diagnose.js --token` (or LIFE360_TOKEN=…).
+  // Verifies a captured bearer token against the real data endpoint. This is
+  // the right mode for accounts that sign in with an emailed code (no password
+  // login is possible), where you must capture a token from the app.
+  const tokenMode = flags.includes("--token") || !!process.env.LIFE360_TOKEN;
+  if (tokenMode) {
+    let token = process.env.LIFE360_TOKEN;
+    if (!token) {
+      token = (await prompt("Paste captured Life360 access token: ")).trim();
+    }
+    // Accept a pasted "Bearer xxx" or a raw token.
+    token = token.replace(/^Bearer\s+/i, "").trim();
+    if (!token) {
+      log("no token provided");
+      process.exit(1);
+    }
+    await testToken(token);
+    return;
+  }
+
   let email = process.env.LIFE360_EMAIL || args[0];
   let password = process.env.LIFE360_PASSWORD;
 
   if (!email) email = (await prompt("Life360 email: ")).trim();
   if (!password) password = await prompt("Life360 password: ", { mask: true });
   if (!email || !password) {
-    log("email and password are both required");
+    log("email and password are both required (or use --token; see README)");
     process.exit(1);
   }
 

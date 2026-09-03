@@ -227,14 +227,26 @@ The module handles this as gracefully as the API allows:
 
 ## Getting an access token
 
-If login is failing, work through these in order. The bundled helper uses the
+> ### ⚠️ Passwordless / email-code (OTP) accounts — read this first
+>
+> If signing in to Life360 **emails you a 6-digit code instead of asking for a
+> password**, your account has no password to send, so the automated
+> `email + password` login (Option A) and `get-token.js` **cannot work for you at
+> all** — regardless of Cloudflare. This is common on newer/2FA-enabled accounts.
+>
+> **Your only route is Option B: capture a token from the app.** Then verify it
+> with `node diagnose.js --token` and put it in `accessToken` (leave
+> `email`/`password` unset). Because there's no password login, the module can't
+> auto-refresh — you'll re-capture when the token is revoked.
+
+For password accounts, work through these in order. The bundled helper uses the
 same TLS impersonation as the module, so it's the most likely to succeed.
 
 > A `403` here is almost always [Cloudflare TLS fingerprinting](#cloudflare-tls-fingerprinting-important),
 > **not** your IP or credentials. Moving to a "residential" connection does *not*
 > help — the TLS stack is what matters.
 
-### Option A — the bundled helper script (easiest)
+### Option A — the bundled helper script (password accounts only)
 
 From the module folder (after `npm install`, so `cycletls` is available):
 
@@ -262,26 +274,46 @@ the module picks it up with no config edit:
 node get-token.js --save
 ```
 
-### Option B — capture a token from the real app (most reliable)
+### Option B — capture a token from the real app (most reliable; required for OTP accounts)
 
-If the helper still `403`s (e.g. the JA3 got blocked, or the account uses 2FA),
-grab a token that the official client already obtained — this bypasses both the
-fingerprinting and 2FA:
+The Life360 app on your phone has already completed login (including any emailed
+code) and holds a valid bearer token. Lifting that token bypasses **both** the
+Cloudflare login gate **and** the passwordless/2FA problem:
 
 1. Put an intercepting proxy in front of your phone — [HTTP Toolkit](https://httptoolkit.com/)
    is the easiest, or use mitmproxy / Charles.
 2. Open the Life360 app and let it load your family.
-3. Find any request to `api-cloudfront.life360.com` (e.g. `/v3/circles`).
+3. Find any request to `api.life360.com` / `api-cloudfront.life360.com`
+   (e.g. `/v3/circles`).
 4. In its request headers, copy the value after `Authorization: Bearer ` — that
    string is your `accessToken`.
 
-> Even with a captured token, the module still needs `cycletls` for its *data*
-> requests — a valid token alone does not get past the fingerprint block
-> ([#84](https://github.com/pnbruckner/ha-life360/issues/84)).
->
-> A token obtained this way won't refresh itself (see
-> [Token lifetime](#token-lifetime--refresh)). When it's revoked, repeat the
-> capture, or add `email` + `password` for hands-off renewal.
+**Verify it before editing config** — this GETs the real data endpoint on both
+hosts and both transports and tells you exactly which to use:
+
+```bash
+node diagnose.js --token
+# or:  LIFE360_TOKEN="eyJ..." node diagnose.js
+```
+
+If it reports ✅, apply the `accessToken` / `baseUrl` / `useImpersonation` values
+it prints:
+
+```js
+config: {
+  accessToken: "PASTE_THE_TOKEN_HERE",
+  baseUrl: "https://api.life360.com",  // whichever host the test said ✅
+  useImpersonation: true,              // true if a cycletls row won, else false
+  updateInterval: 60 * 1000
+  // NOTE: no email/password — an OTP account can't password-login, and a
+  // captured token can't self-refresh. Re-capture when it stops working.
+}
+```
+
+> A captured token still has to pass Cloudflare on the module's *data* requests
+> too — a valid token alone isn't always enough
+> ([#84](https://github.com/pnbruckner/ha-life360/issues/84)). The `--token` test
+> confirms whether it does on your setup before you commit to it.
 
 ### Option C — plain `curl` (usually blocked)
 
