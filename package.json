@@ -1,0 +1,24 @@
+{
+  "name": "mmm-life360",
+  "version": "1.0.0",
+  "description": "A MagicMirror² module that shows the location of all Life360 family members on a map and list, refreshing on a configurable schedule.",
+  "keywords": [
+    "MagicMirror",
+    "MagicMirror2",
+    "module",
+    "life360",
+    "location",
+    "family",
+    "map"
+  ],
+  "license": "MIT",
+  "main": "MMM-Life360.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourname/MMM-Life360.git"
+  },
+  "dependencies": {}
+}

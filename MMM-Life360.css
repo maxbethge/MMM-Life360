@@ -1,0 +1,123 @@
+/* MMM-Life360 styles
+ * Sizing (module width/height, map width/height, font size) is driven by
+ * inline styles from config; this file handles layout and appearance only.
+ */
+
+.mmm-life360 {
+  box-sizing: border-box;
+  text-align: left;
+  line-height: 1.3;
+}
+
+.mmm-life360-status {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.mmm-life360-error {
+  color: #ff6b6b;
+  font-style: normal;
+}
+
+.mmm-life360-header {
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  opacity: 0.8;
+  margin-bottom: 6px;
+  font-size: 0.85em;
+}
+
+/* --- Map ------------------------------------------------------------------ */
+.mmm-life360-map {
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 8px;
+  background: #222;
+}
+
+/* Custom divIcon markers (avoids Leaflet's external image assets) */
+.mmm-life360-marker {
+  background: transparent;
+  border: none;
+}
+
+.mmm-life360-pin {
+  width: 28px;
+  height: 28px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: bold;
+  font-size: 13px;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+
+.mmm-life360-pin {
+  /* Un-rotate the letter so it stays upright inside the rotated pin. */
+  line-height: 1;
+}
+
+.mmm-life360-pin::first-letter {
+  transform: rotate(45deg);
+}
+
+/* Keep Leaflet popups legible against the dark mirror background. */
+.leaflet-popup-content {
+  color: #222;
+  font-size: 13px;
+}
+
+/* --- Member list ---------------------------------------------------------- */
+.mmm-life360-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.mmm-life360-member {
+  display: flex;
+  align-items: flex-start;
+  padding: 4px 0;
+}
+
+.mmm-life360-empty {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.mmm-life360-dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-top: 0.35em;
+  margin-right: 8px;
+}
+
+.mmm-life360-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mmm-life360-name {
+  font-weight: bold;
+}
+
+.mmm-life360-place {
+  opacity: 0.9;
+  font-size: 0.9em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mmm-life360-meta {
+  opacity: 0.65;
+  font-size: 0.8em;
+}

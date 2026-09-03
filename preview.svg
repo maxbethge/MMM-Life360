@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="600" viewBox="0 0 440 600" font-family="Helvetica, Arial, sans-serif">
+  <!-- MMM-Life360 preview mockup (not a live screenshot) -->
+
+  <!-- MagicMirror black background -->
+  <rect width="440" height="600" fill="#000000"/>
+
+  <!-- module padding frame -->
+  <g transform="translate(20 20)">
+
+    <!-- header -->
+    <text x="0" y="14" fill="#999999" font-size="12" font-weight="bold" letter-spacing="2">FAMILY</text>
+
+    <!-- ===================== MAP ===================== -->
+    <g transform="translate(0 26)">
+      <clipPath id="mapClip"><rect width="400" height="300" rx="6"/></clipPath>
+      <g clip-path="url(#mapClip)">
+        <!-- map base -->
+        <rect width="400" height="300" fill="#20232a"/>
+        <!-- faux water -->
+        <path d="M0,210 C90,190 150,250 250,235 C320,224 360,260 400,250 L400,300 L0,300 Z" fill="#1b3a4b"/>
+        <!-- faux roads -->
+        <g stroke="#3a3f4b" stroke-width="6" fill="none" opacity="0.9">
+          <path d="M-10,70 L410,110"/>
+          <path d="M60,-10 L120,310"/>
+          <path d="M-10,180 L410,150"/>
+          <path d="M250,-10 L300,310"/>
+          <path d="M-10,240 L200,210"/>
+        </g>
+        <g stroke="#4a505e" stroke-width="2" fill="none" opacity="0.7">
+          <path d="M-10,120 L410,90"/>
+          <path d="M180,-10 L210,310"/>
+          <path d="M-10,40 L410,30"/>
+        </g>
+        <!-- faux park -->
+        <rect x="300" y="30" width="80" height="70" rx="6" fill="#26402a"/>
+
+        <!-- attribution -->
+        <rect x="250" y="286" width="150" height="14" fill="#000000" opacity="0.45"/>
+        <text x="394" y="297" fill="#cccccc" font-size="9" text-anchor="end">© OpenStreetMap contributors</text>
+      </g>
+
+      <!-- map pins: rotated teardrop with upright initial -->
+      <!-- Alex (red) -->
+      <g transform="translate(150 120)">
+        <path d="M0,0 a14,14 0 1,1 0.01,0 L0,14 Z" transform="rotate(-45) translate(-14 -14)" fill="#e6194B" stroke="#ffffff" stroke-width="2"/>
+        <circle r="14" fill="#e6194B" stroke="#ffffff" stroke-width="2"/>
+        <text x="0" y="4" fill="#ffffff" font-size="13" font-weight="bold" text-anchor="middle">A</text>
+      </g>
+      <!-- Bailey (green) -->
+      <g transform="translate(255 90)">
+        <circle r="14" fill="#3cb44b" stroke="#ffffff" stroke-width="2"/>
+        <text x="0" y="4" fill="#ffffff" font-size="13" font-weight="bold" text-anchor="middle">B</text>
+      </g>
+      <!-- Casey (blue) -->
+      <g transform="translate(110 210)">
+        <circle r="14" fill="#4363d8" stroke="#ffffff" stroke-width="2"/>
+        <text x="0" y="4" fill="#ffffff" font-size="13" font-weight="bold" text-anchor="middle">C</text>
+      </g>
+      <!-- Dana (orange) -->
+      <g transform="translate(320 170)">
+        <circle r="14" fill="#f58231" stroke="#ffffff" stroke-width="2"/>
+        <text x="0" y="4" fill="#ffffff" font-size="13" font-weight="bold" text-anchor="middle">D</text>
+      </g>
+    </g>
+
+    <!-- ===================== LIST ===================== -->
+    <g transform="translate(0 344)" font-size="16">
+      <!-- row: Alex -->
+      <g transform="translate(0 0)">
+        <circle cx="5" cy="6" r="5" fill="#e6194B"/>
+        <text x="18" y="11" fill="#ffffff" font-weight="bold">Alex</text>
+        <text x="18" y="30" fill="#e6e6e6" font-size="14">Home</text>
+        <text x="18" y="47" fill="#8c8c8c" font-size="13">🔋 82% ⚡ · 3m ago</text>
+      </g>
+      <!-- row: Bailey -->
+      <g transform="translate(0 60)">
+        <circle cx="5" cy="6" r="5" fill="#3cb44b"/>
+        <text x="18" y="11" fill="#ffffff" font-weight="bold">Bailey</text>
+        <text x="18" y="30" fill="#e6e6e6" font-size="14">Lincoln High School</text>
+        <text x="18" y="47" fill="#8c8c8c" font-size="13">🔋 47% · 12m ago</text>
+      </g>
+      <!-- row: Casey -->
+      <g transform="translate(0 120)">
+        <circle cx="5" cy="6" r="5" fill="#4363d8"/>
+        <text x="18" y="11" fill="#ffffff" font-weight="bold">Casey</text>
+        <text x="18" y="30" fill="#e6e6e6" font-size="14">120 Main St</text>
+        <text x="18" y="47" fill="#8c8c8c" font-size="13">🔋 63% · 🚗 driving · just now</text>
+      </g>
+      <!-- row: Dana -->
+      <g transform="translate(0 180)">
+        <circle cx="5" cy="6" r="5" fill="#f58231"/>
+        <text x="18" y="11" fill="#ffffff" font-weight="bold">Dana</text>
+        <text x="18" y="30" fill="#e6e6e6" font-size="14">Riverside Office Park</text>
+        <text x="18" y="47" fill="#8c8c8c" font-size="13">🔋 19% · 1h ago</text>
+      </g>
+    </g>
+  </g>
+</svg>
