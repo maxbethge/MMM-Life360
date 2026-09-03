@@ -29,6 +29,18 @@ Module.register("MMM-Life360", {
     authToken:
       "cSgLxOgW7Jm7AbNa16Ki7lhCUcUhCz2Uv6EWt66zBrIZ0Wz7DKZ0lStY1vAP1nA7EObZ8i",
 
+    // User-Agent sent on every request so it looks like the official mobile
+    // app. Bump the version if the shared token starts getting blocked.
+    userAgent: "com.life360.android.safetymapd/KOKO/23.49.0 android/13",
+
+    // Token caching: persist a working token to disk so the module reuses it
+    // across restarts instead of logging in every time (repeated logins are
+    // what trigger Life360's 403s). Life360 issues no refresh token, so the
+    // only way to renew is a fresh password login — done automatically on a
+    // 401 when email + password are configured.
+    cacheToken: true, // set false to never write a token cache file
+    tokenCachePath: "", // "" = <module dir>/.life360-token.json
+
     // Restrict to a single circle by id. Empty = every circle you belong to.
     circleId: "",
 
