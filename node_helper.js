@@ -143,6 +143,11 @@ module.exports = NodeHelper.create({
     return Object.assign(
       {
         Accept: "application/json",
+        // Only request encodings cycletls can decode. Cloudflare defaults to
+        // Brotli (`br`), which some cycletls builds return UN-decoded — leaving
+        // an empty body on an otherwise-200 response. Restricting to gzip/
+        // deflate keeps bodies readable across transports.
+        "Accept-Encoding": "gzip, deflate",
         "cache-control": "no-cache",
         "User-Agent": this.userAgent()
       },
@@ -576,6 +581,17 @@ module.exports = NodeHelper.create({
       );
       err.status = resp.status;
       throw err;
+    }
+
+    // A 200 with an empty body almost always means the response was compressed
+    // with an encoding the transport didn't decode (Cloudflare Brotli). We send
+    // Accept-Encoding: gzip, deflate to avoid this, but guard anyway.
+    if (!resp.bodyText || !resp.bodyText.trim()) {
+      throw new Error(
+        `empty response body from ${apiPath} (HTTP ${resp.status} via ` +
+          `${resp.transport}). Likely an undecoded compressed response; ensure ` +
+          "requests send `Accept-Encoding: gzip, deflate`."
+      );
     }
 
     try {

@@ -75,6 +75,31 @@ Raspberry Pi works), macOS and Windows.
 Leaflet (used for the map) is loaded automatically from a CDN, so an internet
 connection is required for the map tiles.
 
+## Known-good configuration (2FA / email-code accounts)
+
+If your account signs in with an emailed code (no password), this is the setup
+confirmed to work — a token captured from the app, served over cycletls:
+
+```js
+config: {
+  accessToken: "PASTE_CAPTURED_TOKEN",       // from the app (README Option B)
+  baseUrl: "https://api-cloudfront.life360.com",
+  useImpersonation: true,                    // cycletls TLS fingerprint
+  updateInterval: 60 * 1000
+  // no email/password: this account type can't password-login
+}
+```
+
+Verify any token end-to-end first with `node diagnose.js --token`. Two gotchas
+worth knowing:
+
+- **`fetch` is blocked; cycletls works.** Data requests over native `fetch` get
+  a Cloudflare `403`; only the cycletls transport gets through. Keep
+  `useImpersonation: true`.
+- **Brotli → empty bodies.** cycletls doesn't decode Cloudflare's default Brotli
+  compression, which shows up as an HTTP `200` with an *empty body*. The module
+  sends `Accept-Encoding: gzip, deflate` to avoid this; don't override it.
+
 ## Configuration
 
 Add the module to the `modules` array in `~/MagicMirror/config/config.js`:
@@ -176,12 +201,21 @@ default). This is why `npm install` is required.
   happens to accept your fetch fingerprint, but many setups will see `403`.
 - If Cloudflare starts blocking the built-in JA3, set a different one via the
   `ja3` config option.
-- You can force the old behaviour with `useImpersonation: false`.
+- You can force `fetch`-only behaviour with `useImpersonation: false` (expect
+  `403`s on most setups — this is confirmed for real accounts).
+
+**Brotli / empty-body caveat.** cycletls does not decode Cloudflare's default
+Brotli (`br`) compression, which surfaces as an HTTP `200` with an *empty body*
+— a silent "success" with no data. The module requests
+`Accept-Encoding: gzip, deflate` on every call to avoid this; leave that header
+alone. `diagnose.js` explicitly flags a decoded-but-empty 200 rather than
+reporting a false ✅.
 
 > **Honesty note:** the JA3/JA4 explanation is well-supported but not officially
 > confirmed by Life360 (there is no official API). If impersonation stops
-> working, capturing a token from the app (Option C below) is the fallback that
-> always works.
+> working, capturing a token from the app
+> ([Option B](#option-b--capture-a-token-from-the-real-app-most-reliable-required-for-otp-accounts))
+> is the fallback that always works.
 
 ## How authentication works
 

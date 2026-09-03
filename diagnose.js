@@ -102,22 +102,46 @@ function classify(status, headers, bodyText) {
     body.includes("attention required") ||
     body.includes("<!doctype html");
 
+  // A 2xx with an unreadable/empty body is NOT a real success: the request got
+  // through, but we couldn't decode the payload (usually Brotli that the client
+  // didn't decompress). The module would show "success" with no data.
+  const raw = (bodyText || "").trim();
+  let jsonOk = false;
+  if (raw) {
+    try {
+      JSON.parse(raw);
+      jsonOk = true;
+    } catch (e) {
+      jsonOk = false;
+    }
+  }
+
   let verdict;
+  let success = false;
   if (status >= 200 && status < 300) {
-    verdict = "✅ SUCCESS";
+    if (!raw) {
+      verdict =
+        "⚠️  200 but EMPTY body — response not decoded (Brotli?). " +
+        "Set Accept-Encoding: gzip, deflate.";
+    } else if (!jsonOk) {
+      verdict = "⚠️  200 but body isn't JSON — check encoding/endpoint.";
+    } else {
+      verdict = "✅ SUCCESS (valid JSON body)";
+      success = true;
+    }
   } else if (status === 403 && looksCloudflare) {
     verdict = "⛔ CLOUDFLARE BLOCK (TLS fingerprint) — token won't help";
   } else if (status === 403) {
     verdict = "🔑 LIFE360 REJECTED (credentials / authToken / 2FA)";
   } else if (status === 401) {
-    verdict = "🔑 UNAUTHORIZED (bad credentials or client token)";
+    verdict = "🔑 UNAUTHORIZED (token invalid/expired or bad client token)";
   } else if (status === 429) {
     verdict = "⏳ RATE LIMITED — back off and retry later";
   } else {
     verdict = `⚠️  unexpected status ${status}`;
   }
 
-  return { server, cfRay, cfMitigated, verdict };
+  return { server, cfRay, cfMitigated, verdict, success };
 }
 
 function bodyBrief(bodyText) {
@@ -230,6 +254,8 @@ async function testToken(token) {
   const headers = {
     Authorization: `Bearer ${token}`,
     Accept: "application/json",
+    // gzip/deflate only — cycletls may not decode Brotli, giving empty bodies.
+    "Accept-Encoding": "gzip, deflate",
     "cache-control": "no-cache",
     "User-Agent": USER_AGENT
   };
@@ -286,7 +312,7 @@ function report(label, result) {
   if (info.cfMitigated) log(`   cf-mit : ${info.cfMitigated}`);
   log(`   body   : ${bodyBrief(result.bodyText)}`);
   log(`   verdict: ${info.verdict}`);
-  return info.verdict.startsWith("✅") ? result : null;
+  return info.success ? result : null;
 }
 
 async function main() {
@@ -328,6 +354,7 @@ async function main() {
     Authorization: `Basic ${AUTH_TOKEN}`,
     "Content-Type": "application/x-www-form-urlencoded",
     Accept: "application/json",
+    "Accept-Encoding": "gzip, deflate",
     "cache-control": "no-cache",
     "User-Agent": USER_AGENT
   };
