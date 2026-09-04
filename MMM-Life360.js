@@ -114,10 +114,39 @@ Module.register("MMM-Life360", {
     this.map = null;
     this.markerLayer = null;
     this.mapContainer = null;
+    this.lastBounds = []; // remembered marker coords, for re-fitting on resume
+    this.suspended = false; // set by MagicMirror when another scene is shown
 
     // Kick off the first fetch and start the configurable refresh loop.
     this.sendConfig();
     this.scheduleUpdate();
+  },
+
+  /**
+   * MagicMirror lifecycle: called when this module is hidden (e.g. MMM-Scenes2
+   * switches to another scene). A hidden Leaflet container has zero size, so we
+   * just note that we're suspended and skip map work until we're shown again.
+   */
+  suspend() {
+    this.suspended = true;
+    Log.info(`[${this.name}] suspended (hidden)`);
+  },
+
+  /**
+   * MagicMirror lifecycle: called when this module becomes visible again. The
+   * map container was display:none while hidden, so Leaflet's cached size is
+   * stale/zero. Re-measure and re-fit once the container has had a moment to lay
+   * out — a few staggered attempts cover slow scene transitions/animations.
+   */
+  resume() {
+    this.suspended = false;
+    Log.info(`[${this.name}] resumed (visible) — re-measuring map`);
+    if (!this.config.showMap) {
+      return;
+    }
+    [50, 300, 800].forEach((delay) => {
+      setTimeout(() => this.applyMapView(), delay);
+    });
   },
 
   /** Send the config to the node_helper and request a fetch. */
@@ -144,7 +173,9 @@ Module.register("MMM-Life360", {
       this.errorMessage = null;
       this.loaded = true;
       this.updateDom(this.config.animationSpeed);
-      // Give the DOM a tick to attach before (re)drawing the map.
+      // Give the DOM a tick to attach before (re)drawing the map. renderMap()
+      // and applyMapView() both no-op safely if we're suspended/zero-sized;
+      // resume() re-fits when the scene brings us back.
       setTimeout(() => this.renderMap(), 150);
     } else if (notification === "LIFE360_ERROR") {
       Log.error(`[${this.name}] error: ${payload.message}`);
@@ -362,28 +393,51 @@ Module.register("MMM-Life360", {
         bounds.push([member.latitude, member.longitude]);
       });
 
+      // Remember the marker coordinates so resume()/suspend transitions can
+      // re-fit the view without re-fetching data.
+      this.lastBounds = bounds;
+
       // Position the view. CRITICAL: invalidateSize() must run BEFORE fitBounds
       // /setView — the map container is (re)attached to the DOM on every
       // updateDom, and until Leaflet re-measures it, fitBounds computes zoom
       // against a stale/zero size and drops the pins off-screen (map shows, no
-      // pins). We also cap the zoom so a tightly-clustered family doesn't slam
-      // to street level, and re-apply once after paint to catch the first
-      // render where the container hadn't been laid out yet.
-      const applyView = () => {
-        this.map.invalidateSize();
-        if (bounds.length === 1) {
-          this.map.setView(bounds[0], this.config.mapZoom);
-        } else if (bounds.length > 1) {
-          this.map.fitBounds(bounds, {
-            padding: [30, 30],
-            maxZoom: this.config.maxZoom
-          });
-        }
-      };
-      applyView();
-      setTimeout(applyView, 300);
+      // pins). We re-apply once after paint to catch the first render where the
+      // container hadn't been laid out yet.
+      this.applyMapView();
+      setTimeout(() => this.applyMapView(), 300);
     } catch (err) {
       Log.error(`[${this.name}] failed to render map: ${err.message}`);
+    }
+  },
+
+  /**
+   * Re-measure the map and fit the view to the last known marker bounds. Safe
+   * to call any time the module is visible — used both after a data refresh and
+   * on resume() when a scene switch brings the module back. Skips work while the
+   * container is hidden/zero-sized (calling invalidateSize then is what leaves
+   * the map mis-rendered when it reappears).
+   */
+  applyMapView() {
+    if (!this.map || this.suspended) {
+      return;
+    }
+    const el = this.mapContainer;
+    // A hidden (display:none) or not-yet-laid-out container reports zero size;
+    // fitting against that is exactly what breaks the map. Bail and let a later
+    // resume()/render retry once it has real dimensions.
+    if (!el || el.offsetWidth === 0 || el.offsetHeight === 0) {
+      return;
+    }
+
+    this.map.invalidateSize();
+    const bounds = this.lastBounds || [];
+    if (bounds.length === 1) {
+      this.map.setView(bounds[0], this.config.mapZoom);
+    } else if (bounds.length > 1) {
+      this.map.fitBounds(bounds, {
+        padding: [30, 30],
+        maxZoom: this.config.maxZoom
+      });
     }
   },
 

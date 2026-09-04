@@ -468,6 +468,12 @@ The most common fixes, in order:
   layout; make sure you're on the current version.
 - **Map is zoomed in too far / cut off** — lower `maxZoom` (e.g. `13`) to keep a
   clustered family from snapping to street level.
+- **Map mis-renders after a scene switch (MMM-Scenes2 / carousel / `hide()`)** —
+  a hidden Leaflet map has zero size, so it can't lay out until it's visible
+  again. The module implements MagicMirror's `suspend()`/`resume()` hooks: on
+  `resume()` it re-measures the container and re-fits the view (with a few
+  staggered retries to cover scene animations), and it skips map work while
+  suspended. Make sure you're on the current version if you see this.
 - **List too tall** — set `compactList: true` for one line per member, and/or a
   smaller `listFontSize` (e.g. `"13px"`).
 
