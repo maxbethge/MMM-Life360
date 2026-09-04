@@ -82,7 +82,7 @@
 .mmm-life360-member {
   display: flex;
   align-items: flex-start;
-  padding: 4px 0;
+  padding: 2px 0;
 }
 
 .mmm-life360-empty {
@@ -92,11 +92,11 @@
 
 .mmm-life360-dot {
   flex: 0 0 auto;
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  margin-top: 0.35em;
-  margin-right: 8px;
+  margin-top: 0.3em;
+  margin-right: 7px;
 }
 
 .mmm-life360-info {
@@ -120,4 +120,38 @@
 .mmm-life360-meta {
   opacity: 0.65;
   font-size: 0.8em;
+}
+
+/* --- Compact list (compactList: true) ------------------------------------- */
+/* One tight line per member: name · place · meta, ellipsised to fit width. */
+.mmm-life360-list-compact .mmm-life360-member {
+  padding: 1px 0;
+  align-items: baseline;
+}
+
+.mmm-life360-list-compact .mmm-life360-dot {
+  margin-top: 0;
+  align-self: center;
+}
+
+.mmm-life360-list-compact .mmm-life360-info {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.mmm-life360-list-compact .mmm-life360-place {
+  font-size: 0.85em;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mmm-life360-list-compact .mmm-life360-name {
+  flex: 0 0 auto;
+}
+
+.mmm-life360-list-compact .mmm-life360-meta {
+  flex: 0 0 auto;
 }

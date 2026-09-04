@@ -158,7 +158,9 @@ Add the module to the `modules` array in `~/MagicMirror/config/config.js`:
 | `moduleHeight`   | string  | `"auto"`                               | Overall module height. |
 | `mapWidth`       | string  | `"400px"`                              | Map width. |
 | `mapHeight`      | string  | `"300px"`                              | Map height. |
-| `fontSize`       | string  | `"16px"`                               | Base font size for the list. |
+| `fontSize`       | string  | `"16px"`                               | Base font size for the whole module. |
+| `listFontSize`   | string  | `""`                                   | Font size for the member list only. `""` = inherit `fontSize`. Set smaller (e.g. `"13px"`) to condense the list. |
+| `compactList`    | boolean | `false`                                | Condense each member to a single tight line (name · place · meta) with less padding. |
 | `showMap`        | boolean | `true`                                 | Show the Leaflet map. |
 | `showList`       | boolean | `true`                                 | Show the member list. |
 | `showAddress`    | boolean | `true`                                 | Show place/address in the list. |
@@ -167,6 +169,7 @@ Add the module to the `modules` array in `~/MagicMirror/config/config.js`:
 | `showHeader`     | boolean | `true`                                 | Show the "Family" header. |
 | `interactiveMap` | boolean | `false`                                | Allow dragging/zooming the map. |
 | `mapZoom`        | number  | `13`                                   | Zoom level when a single member is shown. |
+| `maxZoom`        | number  | `16`                                   | Cap the auto-zoom when fitting everyone on the map. Lower = more zoomed out (e.g. `13` for a wider view). |
 | `mapTileUrl`     | string  | OpenStreetMap tiles                    | Leaflet tile URL template. |
 | `mapAttribution` | string  | OSM attribution                        | Map attribution text. |
 | `maxMembers`     | number  | `0`                                    | Limit the number of members shown (0 = all). |
@@ -457,6 +460,16 @@ The most common fixes, in order:
   and that `.life360-token.json` is writable by the MagicMirror user.
 - **Map is blank** — check the Pi has internet access for the map tiles, or
   point `mapTileUrl` at a reachable tile server.
+- **Map shows tiles but no pins** — check the browser/PM2 log for
+  `rendering map: N/M member(s) have coordinates`. If `N` is `0`, nobody is
+  currently sharing a location (Life360 returns members without `location`), so
+  there's nothing to plot. If `N` > 0 but pins still don't appear, the map was
+  fitting bounds before it knew its own size — this is fixed by re-fitting after
+  layout; make sure you're on the current version.
+- **Map is zoomed in too far / cut off** — lower `maxZoom` (e.g. `13`) to keep a
+  clustered family from snapping to street level.
+- **List too tall** — set `compactList: true` for one line per member, and/or a
+  smaller `listFontSize` (e.g. `"13px"`).
 
 ## License
 

@@ -68,7 +68,9 @@ Module.register("MMM-Life360", {
     moduleHeight: "auto", // overall module height
     mapWidth: "400px", // map width
     mapHeight: "300px", // map height
-    fontSize: "16px", // base font size for the member list
+    fontSize: "16px", // base font size for the module
+    listFontSize: "", // font size for the member list ("" = inherit fontSize)
+    compactList: false, // tighter rows: single line per member, less padding
 
     // --- Feature toggles ----------------------------------------------------
     showMap: true,
@@ -80,7 +82,8 @@ Module.register("MMM-Life360", {
     interactiveMap: false, // allow dragging/zooming (usually off on a mirror)
 
     // --- Map appearance -----------------------------------------------------
-    mapZoom: 13,
+    mapZoom: 13, // zoom used when only one member is shown
+    maxZoom: 16, // cap auto-zoom when fitting everyone (lower = more zoomed out)
     mapTileUrl: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
     mapAttribution: "&copy; OpenStreetMap contributors",
 
@@ -195,6 +198,13 @@ Module.register("MMM-Life360", {
     if (this.config.showList) {
       const list = document.createElement("ul");
       list.className = "mmm-life360-list";
+      if (this.config.compactList) {
+        list.classList.add("mmm-life360-list-compact");
+      }
+      // Optional independent list font size (falls back to the module font).
+      if (this.config.listFontSize) {
+        list.style.fontSize = this.config.listFontSize;
+      }
 
       const members = this.limitedMembers();
       if (members.length === 0) {
@@ -277,6 +287,19 @@ Module.register("MMM-Life360", {
       (m) => Number.isFinite(m.latitude) && Number.isFinite(m.longitude)
     );
 
+    // Distinguish "no members" from "members without coordinates" so a blank
+    // map is easy to diagnose from the logs.
+    const total = (this.members || []).length;
+    Log.info(
+      `[${this.name}] rendering map: ${points.length}/${total} member(s) have coordinates`
+    );
+    if (total > 0 && points.length === 0) {
+      Log.warn(
+        `[${this.name}] no members have coordinates — location sharing may be ` +
+          "off for everyone, so there are no pins to place"
+      );
+    }
+
     try {
       if (!this.map) {
         this.map = L.map(this.mapContainer, {
@@ -338,14 +361,26 @@ Module.register("MMM-Life360", {
         bounds.push([member.latitude, member.longitude]);
       });
 
-      if (bounds.length === 1) {
-        this.map.setView(bounds[0], this.config.mapZoom);
-      } else if (bounds.length > 1) {
-        this.map.fitBounds(bounds, { padding: [25, 25] });
-      }
-
-      // Container was just (re)attached to the DOM; recompute tile layout.
-      this.map.invalidateSize();
+      // Position the view. CRITICAL: invalidateSize() must run BEFORE fitBounds
+      // /setView — the map container is (re)attached to the DOM on every
+      // updateDom, and until Leaflet re-measures it, fitBounds computes zoom
+      // against a stale/zero size and drops the pins off-screen (map shows, no
+      // pins). We also cap the zoom so a tightly-clustered family doesn't slam
+      // to street level, and re-apply once after paint to catch the first
+      // render where the container hadn't been laid out yet.
+      const applyView = () => {
+        this.map.invalidateSize();
+        if (bounds.length === 1) {
+          this.map.setView(bounds[0], this.config.mapZoom);
+        } else if (bounds.length > 1) {
+          this.map.fitBounds(bounds, {
+            padding: [30, 30],
+            maxZoom: this.config.maxZoom
+          });
+        }
+      };
+      applyView();
+      setTimeout(applyView, 300);
     } catch (err) {
       Log.error(`[${this.name}] failed to render map: ${err.message}`);
     }
