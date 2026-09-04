@@ -33,6 +33,7 @@
 "use strict";
 
 const readline = require("readline");
+const zlib = require("zlib");
 
 const MODULE_NAME = "MMM-Life360";
 const TOKEN_PATH = "/v3/oauth2/token";
@@ -91,6 +92,58 @@ function headerOf(headers, name) {
   return "";
 }
 
+// cycletls 2.x has no `resp.body`; the payload is on `resp.data` (a Buffer,
+// a {type:"Buffer",data:[...]} shape, an array, a string, or a parsed object)
+// and is NOT auto-decompressed. Turn any of those into raw bytes.
+function cycleRawBuffer(resp) {
+  const d = resp && resp.data;
+  if (d == null) {
+    if (resp && typeof resp.text === "string") return Buffer.from(resp.text, "utf8");
+    return Buffer.alloc(0);
+  }
+  if (Buffer.isBuffer(d)) return d;
+  if (d && Array.isArray(d.data)) return Buffer.from(d.data);
+  if (Array.isArray(d)) return Buffer.from(d);
+  if (d instanceof ArrayBuffer) return Buffer.from(d);
+  if (typeof d === "string") return Buffer.from(d, "utf8");
+  if (typeof d === "object") {
+    try {
+      return Buffer.from(JSON.stringify(d), "utf8");
+    } catch (e) {
+      return Buffer.alloc(0);
+    }
+  }
+  return Buffer.alloc(0);
+}
+
+// Decode a cycletls response to text, decompressing per Content-Encoding.
+function decodeCycleBody(resp) {
+  const buf = cycleRawBuffer(resp);
+  if (!buf.length) return "";
+  const enc = String(headerOf(resp.headers, "content-encoding") || "").toLowerCase();
+  try {
+    if (enc.includes("br")) return zlib.brotliDecompressSync(buf).toString("utf8");
+    if (enc.includes("gzip")) return zlib.gunzipSync(buf).toString("utf8");
+    if (enc.includes("deflate")) {
+      try {
+        return zlib.inflateSync(buf).toString("utf8");
+      } catch (e) {
+        return zlib.inflateRawSync(buf).toString("utf8");
+      }
+    }
+  } catch (e) {
+    /* fall through to raw / magic sniff */
+  }
+  if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
+    try {
+      return zlib.gunzipSync(buf).toString("utf8");
+    } catch (e) {
+      /* ignore */
+    }
+  }
+  return buf.toString("utf8");
+}
+
 function classify(status, headers, bodyText) {
   const server = headerOf(headers, "server");
   const cfRay = headerOf(headers, "cf-ray");
@@ -123,8 +176,8 @@ function classify(status, headers, bodyText) {
   if (status >= 200 && status < 300) {
     if (!raw) {
       verdict =
-        "⚠️  200 but EMPTY body — cycletls dropped the payload. If c-len > 0 " +
-        "above, it's an HTTP/2 bug (forceHTTP1) rather than compression.";
+        "⚠️  200 but EMPTY body — could not read/decode the payload. " +
+        "Ensure cycletls is current (`npm install`).";
     } else if (!jsonOk) {
       verdict = "⚠️  200 but body isn't JSON — check encoding/endpoint.";
     } else {
@@ -166,8 +219,8 @@ async function tryCycle(host, bodyString, headers) {
       { body: bodyString, headers, ja3: JA3, userAgent: USER_AGENT, timeout: 30 },
       "post"
     );
-    const bodyText =
-      typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body);
+    // cycletls 2.x: body is on resp.data, not resp.body, and is not decoded.
+    const bodyText = decodeCycleBody(resp);
     return { status: resp.status, headers: resp.headers || {}, bodyText };
   } catch (e) {
     return { error: e.message };
@@ -204,23 +257,6 @@ async function tryFetch(host, bodyString, headers) {
 }
 
 // --- token-test mode: GET a data endpoint with a captured bearer token -----
-// An empty 200 from cycletls can have two very different causes:
-//   1. Compression cycletls didn't decode → work around with Accept-Encoding.
-//   2. cycletls dropping the body of a Cloudflare HTTP/2 response → work around
-//      with forceHTTP1: true (a well-known cycletls issue).
-// We sweep BOTH dimensions and, for each attempt, capture the tell-tale
-// response headers (content-length / content-encoding) and the raw body's
-// type+length. That distinguishes "the server sent bytes cycletls dropped"
-// (content-length > 0 but empty body → an HTTP/2/decoding bug) from "the
-// server genuinely returned nothing".
-const CYCLE_COMBOS = [
-  { label: "identity, http1", enc: "identity", http1: true },
-  { label: "identity, http2", enc: "identity", http1: false },
-  { label: "client-managed, http1", enc: null, http1: true },
-  { label: "client-managed, http2", enc: null, http1: false },
-  { label: "gzip/deflate, http1", enc: "gzip, deflate", http1: true }
-];
-
 async function getCycle(host, path, baseHeaders) {
   let initCycleTLS;
   try {
@@ -231,51 +267,22 @@ async function getCycle(host, path, baseHeaders) {
   let client;
   try {
     client = await initCycleTLS();
-    let last = null;
-    for (const combo of CYCLE_COMBOS) {
-      const headers = Object.assign({}, baseHeaders);
-      if (combo.enc) {
-        headers["Accept-Encoding"] = combo.enc;
-      } else {
-        delete headers["Accept-Encoding"];
-      }
-      const resp = await client(
-        `${host}${path}`,
-        {
-          headers,
-          ja3: JA3,
-          userAgent: USER_AGENT,
-          timeout: 30,
-          forceHTTP1: combo.http1
-        },
-        "get"
-      );
-      const rawType = typeof resp.body;
-      const rawLen =
-        resp.body == null
-          ? 0
-          : rawType === "string"
-          ? resp.body.length
-          : JSON.stringify(resp.body).length;
-      const bodyText =
-        rawType === "string" ? resp.body : JSON.stringify(resp.body);
-      last = {
-        status: resp.status,
-        headers: resp.headers || {},
-        bodyText,
-        encoding: combo.label,
-        rawType,
-        rawLen
-      };
-      const ok2xx = resp.status >= 200 && resp.status < 300;
-      const hasBody = !!(bodyText && bodyText.trim());
-      // Stop at the first combo that yields a usable body, OR any non-2xx
-      // (an empty 2xx just means "this combo failed — try the next one").
-      if (!ok2xx || hasBody) {
-        return last;
-      }
-    }
-    return last;
+    const headers = Object.assign({}, baseHeaders);
+    const resp = await client(
+      `${host}${path}`,
+      { headers, ja3: JA3, userAgent: USER_AGENT, timeout: 30 },
+      "get"
+    );
+    // cycletls 2.x: read+decompress the body from resp.data (not resp.body).
+    const bodyText = decodeCycleBody(resp);
+    const raw = cycleRawBuffer(resp);
+    return {
+      status: resp.status,
+      headers: resp.headers || {},
+      bodyText,
+      rawType: resp.data == null ? "none" : typeof resp.data,
+      rawLen: raw.length
+    };
   } catch (e) {
     return { error: e.message };
   } finally {
@@ -307,8 +314,8 @@ async function getFetch(host, path, headers) {
 }
 
 async function testToken(token) {
-  // No Accept-Encoding here: getCycle() sweeps encodings for cycletls, and
-  // native fetch decodes gzip/deflate/br on its own.
+  // No Accept-Encoding here: cycletls' body is read+decompressed from resp.data
+  // (decodeCycleBody), and native fetch decodes gzip/deflate/br on its own.
   const headers = {
     Authorization: `Bearer ${token}`,
     Accept: "application/json",
@@ -319,15 +326,13 @@ async function testToken(token) {
 
   log("Testing your captured token against the /v3/circles DATA endpoint…");
   log("(this is what the module actually calls on every refresh)");
-  log("cycletls rows sweep encoding × HTTP version until a real body appears.");
-  log("Watch c-len vs rawbody: content-length > 0 with an empty body = the");
-  log("server sent data cycletls dropped (an HTTP/2 bug → forceHTTP1 helps).");
+  log("The rawbody line shows the bytes cycletls returned before decoding.");
 
   let winner = null;
   for (const host of HOSTS) {
     const c = await getCycle(host, path, headers);
     if (report(`cycletls  →  ${host}${path}`, c)) {
-      winner = { host, transport: "cycletls", encoding: c.encoding };
+      winner = { host, transport: "cycletls" };
     }
     const f = await getFetch(host, path, headers);
     if (report(`fetch     →  ${host}${path}`, f)) {
@@ -344,12 +349,6 @@ async function testToken(token) {
     log(
       `   useImpersonation: ${winner.transport === "cycletls" ? "true" : "false"}`
     );
-    if (winner.transport === "cycletls" && winner.encoding) {
-      log(
-        `   (the module auto-negotiates this; the winning encoding was ` +
-          `"${winner.encoding}")`
-      );
-    }
     log("   (leave email/password unset — this account can't password-login)");
     log("Then restart MagicMirror. Re-run this when the token expires.");
   } else {
@@ -375,16 +374,12 @@ function report(label, result) {
   log(`   server : ${info.server || "?"}`);
   if (info.cfRay) log(`   cf-ray : ${info.cfRay}`);
   if (info.cfMitigated) log(`   cf-mit : ${info.cfMitigated}`);
-  if (result.encoding) log(`   combo  : ${result.encoding}`);
-  // Tell-tale headers: if content-length > 0 but our body is empty, the server
-  // DID send bytes and the client dropped them (HTTP/2 / decoding bug), not a
-  // truly empty response.
-  const clen = headerOf(result.headers, "content-length");
   const cenc = headerOf(result.headers, "content-encoding");
   const ctype = headerOf(result.headers, "content-type");
-  if (clen) log(`   c-len  : ${clen}`);
   if (cenc) log(`   c-enc  : ${cenc}`);
   if (ctype) log(`   c-type : ${ctype}`);
+  // rawbody = the bytes cycletls handed us on resp.data BEFORE decompression.
+  // If this is non-zero but the decoded body is empty, decoding failed.
   if (result.rawType !== undefined) {
     log(`   rawbody: type=${result.rawType} len=${result.rawLen}`);
   }

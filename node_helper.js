@@ -37,6 +37,7 @@
 const NodeHelper = require("node_helper");
 const fs = require("fs");
 const path = require("path");
+const zlib = require("zlib");
 
 const MODULE_NAME = "MMM-Life360";
 // Two known API hosts. `api.life360.com` is the one the community library that
@@ -211,88 +212,34 @@ module.exports = NodeHelper.create({
     const client = await this.getCycleClient();
     if (client) {
       try {
-        // cycletls can return an HTTP 200 with an EMPTY body for two reasons:
-        //   1. a compressed reply it didn't decode (Cloudflare defaults to
-        //      Brotli) — avoided by asking for `identity` (uncompressed);
-        //   2. it silently drops the body of a Cloudflare HTTP/2 response — a
-        //      known cycletls bug, avoided with `forceHTTP1: true`.
-        // We negotiate over BOTH dimensions: {Accept-Encoding, forceHTTP1}.
-        // `cycleCombo` remembers the combo that last produced a real body so we
-        // normally issue a single request; the rest stay as ordered fallbacks.
-        const defaults = [
-          { enc: "identity", http1: true },
-          { enc: "identity", http1: false },
-          { enc: "", http1: true },
-          { enc: "", http1: false }
-        ];
-        const same = (a, b) => a.enc === b.enc && a.http1 === b.http1;
-        const combos = this.cycleCombo
-          ? [this.cycleCombo, ...defaults.filter((c) => !same(c, this.cycleCombo))]
-          : defaults;
+        const resp = await client(
+          url,
+          {
+            body: body || "",
+            headers,
+            ja3: this.ja3(),
+            userAgent: headers["User-Agent"] || this.userAgent(),
+            timeout: 30,
+            disableRedirect: false
+          },
+          method.toLowerCase()
+        );
 
-        let last = null;
-        for (const combo of combos) {
-          const hdrs = Object.assign({}, headers);
-          if (combo.enc) {
-            hdrs["Accept-Encoding"] = combo.enc;
-          } else {
-            delete hdrs["Accept-Encoding"];
-          }
+        // IMPORTANT: cycletls 2.x does NOT expose `resp.body`. Its response is
+        // { status, headers, finalUrl, data, json/text/... }. Reading the
+        // (non-existent) `resp.body` is what made every call look "empty".
+        // `decodeCycleBody` reads the real bytes from `resp.data` and inflates
+        // them according to Content-Encoding (Life360 replies with gzip).
+        const bodyText = this.decodeCycleBody(resp);
 
-          const resp = await client(
-            url,
-            {
-              body: body || "",
-              headers: hdrs,
-              ja3: this.ja3(),
-              userAgent: hdrs["User-Agent"] || this.userAgent(),
-              timeout: 30,
-              disableRedirect: false,
-              forceHTTP1: combo.http1
-            },
-            method.toLowerCase()
-          );
-
-          // cycletls returns body as a string, or a parsed object for JSON.
-          const bodyText =
-            typeof resp.body === "string"
-              ? resp.body
-              : JSON.stringify(resp.body);
-
-          last = {
-            status: resp.status,
-            ok: resp.status >= 200 && resp.status < 300,
-            statusText: "",
-            bodyText,
-            headers: resp.headers || {},
-            transport: "cycletls"
-          };
-
-          const emptyOk2xx = last.ok && (!bodyText || !bodyText.trim());
-          if (!emptyOk2xx) {
-            // Got a usable answer (real body, or a non-2xx worth surfacing).
-            // Remember the winning combo so future calls skip the sweep; update
-            // it if a fallback just beat a stale choice.
-            if (last.ok && (!this.cycleCombo || !same(this.cycleCombo, combo))) {
-              this.cycleCombo = combo;
-              this.log(
-                `cycletls transport negotiated: ${
-                  combo.enc ? `Accept-Encoding: ${combo.enc}` : "client-managed"
-                }, ${combo.http1 ? "HTTP/1.1" : "HTTP/2"}`
-              );
-            }
-            return last;
-          }
-          // 2xx but empty — this combo couldn't retrieve the body; try the next.
-          this.warn(
-            `cycletls got HTTP ${last.status} with an empty body (${
-              combo.enc ? `Accept-Encoding: ${combo.enc}` : "client-managed"
-            }, ${combo.http1 ? "HTTP/1.1" : "HTTP/2"}); trying another combo`
-          );
-        }
-        // Every combo returned an empty 2xx — return the last so apiGet()'s
-        // empty-body guard reports a clear, actionable error.
-        return last;
+        return {
+          status: resp.status,
+          ok: resp.status >= 200 && resp.status < 300,
+          statusText: "",
+          bodyText,
+          headers: resp.headers || {},
+          transport: "cycletls"
+        };
       } catch (e) {
         // A transport-level failure (not an HTTP error) — try fetch as a
         // last resort rather than failing the whole poll.
@@ -330,6 +277,74 @@ module.exports = NodeHelper.create({
     } catch (e) {
       return "";
     }
+  },
+
+  /**
+   * Extract the raw response bytes from a cycletls 2.x response.
+   * cycletls exposes the payload on `resp.data`, which may be a Buffer, a
+   * { type: "Buffer", data: [...] } shape, a plain array of byte values, an
+   * ArrayBuffer, a string, or — for an already-parsed JSON response — an
+   * object/array. Returns a Buffer (empty if there's nothing usable).
+   */
+  cycleRawBuffer(resp) {
+    const d = resp && resp.data;
+    if (d == null) {
+      // Some builds only fill `text`; fall back to it if present as a string.
+      if (resp && typeof resp.text === "string") {
+        return Buffer.from(resp.text, "utf8");
+      }
+      return Buffer.alloc(0);
+    }
+    if (Buffer.isBuffer(d)) return d;
+    if (d && Array.isArray(d.data)) return Buffer.from(d.data); // {type:"Buffer",data:[]}
+    if (Array.isArray(d)) return Buffer.from(d);
+    if (d instanceof ArrayBuffer) return Buffer.from(d);
+    if (typeof d === "string") return Buffer.from(d, "utf8");
+    // Already-parsed object/array (uncompressed JSON) — re-serialise it.
+    if (typeof d === "object") {
+      try {
+        return Buffer.from(JSON.stringify(d), "utf8");
+      } catch (e) {
+        return Buffer.alloc(0);
+      }
+    }
+    return Buffer.alloc(0);
+  },
+
+  /**
+   * Decode a cycletls 2.x response body to a UTF-8 string, decompressing per
+   * the Content-Encoding header (cycletls does NOT auto-decompress). Handles
+   * gzip, deflate and brotli, sniffs the gzip magic number as a fallback, and
+   * returns plain UTF-8 when the payload isn't compressed.
+   */
+  decodeCycleBody(resp) {
+    const buf = this.cycleRawBuffer(resp);
+    if (!buf.length) return "";
+
+    const enc = String(this.header(resp, "content-encoding") || "").toLowerCase();
+    try {
+      if (enc.includes("br")) return zlib.brotliDecompressSync(buf).toString("utf8");
+      if (enc.includes("gzip")) return zlib.gunzipSync(buf).toString("utf8");
+      if (enc.includes("deflate")) {
+        try {
+          return zlib.inflateSync(buf).toString("utf8");
+        } catch (e) {
+          return zlib.inflateRawSync(buf).toString("utf8");
+        }
+      }
+    } catch (e) {
+      this.warn(`failed to decompress ${enc} response (${e.message}); using raw bytes`);
+    }
+
+    // No/unknown encoding: sniff the gzip magic bytes in case the header lied.
+    if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
+      try {
+        return zlib.gunzipSync(buf).toString("utf8");
+      } catch (e) {
+        /* fall through to raw */
+      }
+    }
+    return buf.toString("utf8");
   },
 
   /** Trim a response body for inclusion in an error message. */
@@ -638,16 +653,14 @@ module.exports = NodeHelper.create({
       throw err;
     }
 
-    // A 200 with an empty body almost always means the response was compressed
-    // with an encoding the transport didn't decode (Cloudflare Brotli via
-    // cycletls). httpRequest() already retries with alternate encodings; if we
-    // still have nothing, surface a clear, actionable error.
+    // A 200 with a genuinely empty body is unusual now that we read the body
+    // correctly (cycletls 2.x puts it on `resp.data`, decoded by
+    // decodeCycleBody). If it still happens, surface a clear error.
     if (!resp.bodyText || !resp.bodyText.trim()) {
       throw new Error(
         `empty response body from ${apiPath} (HTTP ${resp.status} via ` +
-          `${resp.transport}). The response was compressed with an encoding ` +
-          "cycletls could not decode. Try updating cycletls (`npm install`), " +
-          "or run `node diagnose.js --token` to find a working encoding."
+          `${resp.transport}). Run \`node diagnose.js --token\` to inspect the ` +
+          "raw response."
       );
     }
 

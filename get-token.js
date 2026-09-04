@@ -24,6 +24,7 @@
 const readline = require("readline");
 const fs = require("fs");
 const path = require("path");
+const zlib = require("zlib");
 
 const MODULE_NAME = "MMM-Life360";
 const BASE_URL = "https://api-cloudfront.life360.com";
@@ -43,6 +44,67 @@ const CACHE_FILE = path.join(__dirname, ".life360-token.json");
 
 function log(msg) {
   console.error(`[${MODULE_NAME}] ${msg}`); // logs go to stderr...
+}
+
+function headerOf(headers, name) {
+  const h = headers || {};
+  const want = name.toLowerCase();
+  for (const k of Object.keys(h)) {
+    if (k.toLowerCase() === want) {
+      return Array.isArray(h[k]) ? h[k].join(",") : h[k];
+    }
+  }
+  return "";
+}
+
+// cycletls 2.x exposes the payload on resp.data (NOT resp.body) and does not
+// decompress it. Turn resp.data into raw bytes, then inflate per encoding.
+function cycleRawBuffer(resp) {
+  const d = resp && resp.data;
+  if (d == null) {
+    if (resp && typeof resp.text === "string") return Buffer.from(resp.text, "utf8");
+    return Buffer.alloc(0);
+  }
+  if (Buffer.isBuffer(d)) return d;
+  if (d && Array.isArray(d.data)) return Buffer.from(d.data);
+  if (Array.isArray(d)) return Buffer.from(d);
+  if (d instanceof ArrayBuffer) return Buffer.from(d);
+  if (typeof d === "string") return Buffer.from(d, "utf8");
+  if (typeof d === "object") {
+    try {
+      return Buffer.from(JSON.stringify(d), "utf8");
+    } catch (e) {
+      return Buffer.alloc(0);
+    }
+  }
+  return Buffer.alloc(0);
+}
+
+function decodeCycleBody(resp) {
+  const buf = cycleRawBuffer(resp);
+  if (!buf.length) return "";
+  const enc = String(headerOf(resp.headers, "content-encoding") || "").toLowerCase();
+  try {
+    if (enc.includes("br")) return zlib.brotliDecompressSync(buf).toString("utf8");
+    if (enc.includes("gzip")) return zlib.gunzipSync(buf).toString("utf8");
+    if (enc.includes("deflate")) {
+      try {
+        return zlib.inflateSync(buf).toString("utf8");
+      } catch (e) {
+        return zlib.inflateRawSync(buf).toString("utf8");
+      }
+    }
+  } catch (e) {
+    /* fall through */
+  }
+  if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
+    try {
+      return zlib.gunzipSync(buf).toString("utf8");
+    } catch (e) {
+      /* ignore */
+    }
+  }
+  return buf.toString("utf8");
 }
 
 /** Prompt for a line of input (optionally masking, for passwords). */
@@ -123,8 +185,8 @@ async function postToken(bodyString) {
         },
         "post"
       );
-      const bodyText =
-        typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body);
+      // cycletls 2.x: body is on resp.data, not resp.body, and isn't decoded.
+      const bodyText = decodeCycleBody(resp);
       return {
         status: resp.status,
         statusText: "",

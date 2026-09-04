@@ -96,12 +96,11 @@ worth knowing:
 - **`fetch` is blocked; cycletls works.** Data requests over native `fetch` get
   a Cloudflare `403`; only the cycletls transport gets through. Keep
   `useImpersonation: true`.
-- **Compression → empty bodies.** cycletls doesn't auto-decompress responses, so
-  a compressed reply (Cloudflare defaults to Brotli) arrives as an HTTP `200`
-  with an *empty body*. The module works around this by negotiating the
-  `Accept-Encoding` itself (preferring uncompressed `identity`) and retrying with
-  an alternate encoding if a `200` still comes back empty — so leave
-  `Accept-Encoding` unset and let the module manage it.
+- **Empty bodies were a client bug, now fixed.** cycletls 2.x returns the body on
+  `resp.data` (not `resp.body`) and does **not** decompress it. The module now
+  reads `resp.data` and inflates gzip/deflate/brotli itself, so responses decode
+  correctly. If you had seen an HTTP `200` with an *empty body* before, that was
+  this bug — updating the module fixes it.
 
 ## Configuration
 
@@ -207,14 +206,15 @@ default). This is why `npm install` is required.
 - You can force `fetch`-only behaviour with `useImpersonation: false` (expect
   `403`s on most setups — this is confirmed for real accounts).
 
-**Compression / empty-body caveat.** cycletls does not auto-decompress
-responses, so a compressed reply (Cloudflare defaults to Brotli, `br`) surfaces
-as an HTTP `200` with an *empty body* — a silent "success" with no data. The
-module negotiates `Accept-Encoding` itself (preferring uncompressed `identity`,
-then falling back to letting cycletls manage gzip) and retries automatically if
-a `200` comes back empty, remembering whichever strategy yields a real body.
-`diagnose.js` sweeps the same encodings and explicitly flags an empty 200 rather
-than reporting a false ✅.
+**Empty-body caveat (cycletls response shape).** cycletls 2.x does **not**
+expose `resp.body`; it returns the payload on `resp.data` and does not
+decompress it (Cloudflare responds with gzip/Brotli). Reading the wrong field
+looks exactly like an HTTP `200` with an *empty body* — a silent "success" with
+no data. The module reads `resp.data` and inflates gzip, deflate and brotli with
+Node's `zlib` (sniffing the gzip magic bytes as a fallback), so bodies decode
+correctly. `diagnose.js` uses the same decoder and prints a `rawbody` line
+showing the pre-decode byte count, and still flags an empty `200` rather than
+reporting a false ✅.
 
 > **Honesty note:** the JA3/JA4 explanation is well-supported but not officially
 > confirmed by Life360 (there is no official API). If impersonation stops
