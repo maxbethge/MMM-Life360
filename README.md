@@ -468,6 +468,12 @@ The most common fixes, in order:
   layout; make sure you're on the current version.
 - **Map is zoomed in too far / cut off** — lower `maxZoom` (e.g. `13`) to keep a
   clustered family from snapping to street level.
+- **Several members at the same place show one pin** — this is intentional. When
+  two or more located members share (almost) the same spot (rounded to ≈11 m),
+  the module draws a single round "pie" marker split into a colored wedge per
+  member (matching their list-dot color) with the head-count in the center.
+  Tap/click it (needs `interactiveMap: true`) to see the popup listing everyone
+  there. A lone member still gets the normal teardrop pin.
 - **Map mis-renders after a scene switch (MMM-Scenes2 / carousel / `hide()`)** —
   a hidden Leaflet map has zero size, so it can't lay out until it's visible
   again. The module implements MagicMirror's `suspend()`/`resume()` hooks: on

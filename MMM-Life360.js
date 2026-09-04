@@ -314,9 +314,18 @@ Module.register("MMM-Life360", {
       return;
     }
 
-    const points = (this.members || []).filter(
-      (m) => Number.isFinite(m.latitude) && Number.isFinite(m.longitude)
-    );
+    // Keep each member's index within the full member list so a pin's colour
+    // matches that member's list dot (colorFor is index-based). Filtering would
+    // renumber them and desync the two.
+    const points = [];
+    (this.members || []).forEach((member, index) => {
+      if (
+        Number.isFinite(member.latitude) &&
+        Number.isFinite(member.longitude)
+      ) {
+        points.push({ member, index });
+      }
+    });
 
     // Distinguish "no members" from "members without coordinates" so a blank
     // map is easy to diagnose from the logs.
@@ -354,43 +363,20 @@ Module.register("MMM-Life360", {
 
       this.markerLayer.clearLayers();
 
+      // Members sharing (almost) the same coordinates would otherwise stack and
+      // hide each other. Group them by a rounded lat/long key (~11 m) and draw a
+      // single combined marker per spot.
+      const groups = this.groupByLocation(points);
+
       const bounds = [];
-      points.forEach((member, index) => {
-        const color = this.colorFor(index);
-        const initial = (member.name || "?").trim().charAt(0).toUpperCase();
-
-        // Build the pin as a DOM node so the (member-derived) initial is set
-        // via textContent, never interpolated into an HTML string.
-        const pin = document.createElement("div");
-        pin.className = "mmm-life360-pin";
-        pin.style.background = color;
-        pin.textContent = initial;
-
-        const icon = L.divIcon({
-          className: "mmm-life360-marker",
-          html: pin, // Leaflet accepts an HTMLElement here
-          // Keep in sync with .mmm-life360-pin in the CSS (20×20; anchor = half).
-          iconSize: [20, 20],
-          iconAnchor: [10, 10]
-        });
-
-        // Popup content built with DOM + textContent (no HTML strings).
-        const popup = document.createElement("div");
-        const popupName = document.createElement("b");
-        popupName.textContent = member.name || "Unknown";
-        popup.appendChild(popupName);
-        const detail = member.placeName || member.address || "";
-        if (detail) {
-          popup.appendChild(document.createElement("br"));
-          const detailEl = document.createElement("span");
-          detailEl.textContent = detail;
-          popup.appendChild(detailEl);
-        }
-
-        L.marker([member.latitude, member.longitude], { icon })
-          .bindPopup(popup)
-          .addTo(this.markerLayer);
-        bounds.push([member.latitude, member.longitude]);
+      groups.forEach((group) => {
+        const first = group[0].member;
+        const marker =
+          group.length === 1
+            ? this.buildSinglePin(group[0])
+            : this.buildClusterPin(group);
+        marker.addTo(this.markerLayer);
+        bounds.push([first.latitude, first.longitude]);
       });
 
       // Remember the marker coordinates so resume()/suspend transitions can
@@ -439,6 +425,182 @@ Module.register("MMM-Life360", {
         maxZoom: this.config.maxZoom
       });
     }
+  },
+
+  /**
+   * Group located members that share (almost) the same spot so co-located
+   * people don't stack invisibly on top of each other. Rounds lat/long to
+   * ~4 decimal places (≈11 m) and buckets by that key, preserving list order
+   * (and therefore colour order) within each group.
+   */
+  groupByLocation(points) {
+    const buckets = new Map();
+    const order = [];
+    points.forEach((point) => {
+      const { member } = point;
+      const key = `${member.latitude.toFixed(4)},${member.longitude.toFixed(4)}`;
+      if (!buckets.has(key)) {
+        buckets.set(key, []);
+        order.push(key);
+      }
+      buckets.get(key).push(point);
+    });
+    return order.map((key) => buckets.get(key));
+  },
+
+  /** Build a normal teardrop pin for a single member at a location. */
+  buildSinglePin(point) {
+    const { member, index } = point;
+    const color = this.colorFor(index);
+    const initial = (member.name || "?").trim().charAt(0).toUpperCase();
+
+    // Build the pin as a DOM node so the (member-derived) initial is set via
+    // textContent, never interpolated into an HTML string.
+    const pin = document.createElement("div");
+    pin.className = "mmm-life360-pin";
+    pin.style.background = color;
+    pin.textContent = initial;
+
+    const icon = L.divIcon({
+      className: "mmm-life360-marker",
+      html: pin, // Leaflet accepts an HTMLElement here
+      // Keep in sync with .mmm-life360-pin in the CSS (20×20; anchor = half).
+      iconSize: [20, 20],
+      iconAnchor: [10, 10]
+    });
+
+    return L.marker([member.latitude, member.longitude], { icon }).bindPopup(
+      this.buildGroupPopup(point ? [point] : [])
+    );
+  },
+
+  /**
+   * Build a combined "pie" badge for multiple members at one spot: a round
+   * marker split into equal colored wedges (one per member, matching their list
+   * dot colour) with the member count in the centre. Uses an SVG conic-style
+   * pie so the individual colours are all visible at a glance.
+   */
+  buildClusterPin(group) {
+    const size = 30; // px — a touch larger than a single pin so the count fits
+    const r = size / 2;
+    const count = group.length;
+
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("width", String(size));
+    svg.setAttribute("height", String(size));
+    svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+    svg.classList.add("mmm-life360-cluster-svg");
+
+    // One wedge per member. A single full circle (count === 1) never reaches
+    // here, so every group has >= 2 slices.
+    const sliceAngle = (2 * Math.PI) / count;
+    group.forEach((point, i) => {
+      // Start at the top (−90°) and go clockwise.
+      const start = -Math.PI / 2 + i * sliceAngle;
+      const end = start + sliceAngle;
+      const x1 = r + r * Math.cos(start);
+      const y1 = r + r * Math.sin(start);
+      const x2 = r + r * Math.cos(end);
+      const y2 = r + r * Math.sin(end);
+      const largeArc = sliceAngle > Math.PI ? 1 : 0;
+
+      const path = document.createElementNS(NS, "path");
+      path.setAttribute(
+        "d",
+        `M ${r} ${r} L ${x1.toFixed(3)} ${y1.toFixed(3)} ` +
+          `A ${r} ${r} 0 ${largeArc} 1 ${x2.toFixed(3)} ${y2.toFixed(3)} Z`
+      );
+      path.setAttribute("fill", this.colorFor(point.index));
+      svg.appendChild(path);
+    });
+
+    // Centre disc + count so the number stays legible over the wedges.
+    const disc = document.createElementNS(NS, "circle");
+    disc.setAttribute("cx", String(r));
+    disc.setAttribute("cy", String(r));
+    disc.setAttribute("r", String(r * 0.55));
+    disc.setAttribute("class", "mmm-life360-cluster-center");
+    svg.appendChild(disc);
+
+    const label = document.createElementNS(NS, "text");
+    label.setAttribute("x", String(r));
+    label.setAttribute("y", String(r));
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("dominant-baseline", "central");
+    label.setAttribute("class", "mmm-life360-cluster-count");
+    label.textContent = String(count); // count is a number — safe
+
+    svg.appendChild(label);
+
+    const wrap = document.createElement("div");
+    wrap.className = "mmm-life360-cluster";
+    wrap.appendChild(svg);
+
+    const icon = L.divIcon({
+      className: "mmm-life360-marker",
+      html: wrap,
+      iconSize: [size, size],
+      iconAnchor: [r, r]
+    });
+
+    const first = group[0].member;
+    return L.marker([first.latitude, first.longitude], { icon }).bindPopup(
+      this.buildGroupPopup(group)
+    );
+  },
+
+  /**
+   * Popup listing everyone at a location, each with a colour swatch matching
+   * their pin/list colour. Built with DOM + textContent (no HTML strings) so
+   * member-derived text can never inject markup.
+   */
+  buildGroupPopup(group) {
+    const popup = document.createElement("div");
+    popup.className = "mmm-life360-popup";
+
+    // Shared place/address (all members in a group are at the same spot).
+    const detail =
+      (group[0] &&
+        (group[0].member.placeName || group[0].member.address)) ||
+      "";
+    if (detail && group.length > 1) {
+      const place = document.createElement("div");
+      place.className = "mmm-life360-popup-place";
+      place.textContent = detail;
+      popup.appendChild(place);
+    }
+
+    group.forEach((point) => {
+      const { member } = point;
+      const row = document.createElement("div");
+      row.className = "mmm-life360-popup-row";
+
+      const swatch = document.createElement("span");
+      swatch.className = "mmm-life360-popup-swatch";
+      swatch.style.backgroundColor = this.colorFor(point.index);
+      row.appendChild(swatch);
+
+      const nameEl = document.createElement("b");
+      nameEl.textContent = member.name || "Unknown";
+      row.appendChild(nameEl);
+
+      // For a single-member popup, keep the place on its own line as before.
+      if (group.length === 1) {
+        const only = member.placeName || member.address || "";
+        if (only) {
+          const br = document.createElement("br");
+          row.appendChild(br);
+          const detailEl = document.createElement("span");
+          detailEl.textContent = only;
+          row.appendChild(detailEl);
+        }
+      }
+
+      popup.appendChild(row);
+    });
+
+    return popup;
   },
 
   /** Return members trimmed to config.maxMembers (0 = all). */

@@ -66,10 +66,57 @@
   transform: rotate(45deg);
 }
 
+/* Combined "pie" marker for multiple members at the same spot. */
+.mmm-life360-cluster {
+  line-height: 0;
+}
+
+.mmm-life360-cluster-svg {
+  display: block;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.5));
+}
+
+.mmm-life360-cluster-svg path {
+  stroke: rgba(255, 255, 255, 0.85);
+  stroke-width: 1;
+}
+
+.mmm-life360-cluster-center {
+  fill: rgba(0, 0, 0, 0.55);
+  stroke: rgba(255, 255, 255, 0.85);
+  stroke-width: 1;
+}
+
+.mmm-life360-cluster-count {
+  fill: #fff;
+  font-weight: bold;
+  font-size: 13px;
+}
+
 /* Keep Leaflet popups legible against the dark mirror background. */
 .leaflet-popup-content {
   color: #222;
   font-size: 13px;
+}
+
+.mmm-life360-popup-place {
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+
+.mmm-life360-popup-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
+}
+
+.mmm-life360-popup-swatch {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
 }
 
 /* --- Member list ---------------------------------------------------------- */
