@@ -78,11 +78,11 @@ connection is required for the map tiles.
 ## Known-good configuration (2FA / email-code accounts)
 
 If your account signs in with an emailed code (no password), this is the setup
-confirmed to work — a token captured from the app, served over cycletls:
+confirmed to work — a token captured from the browser, served over cycletls:
 
 ```js
 config: {
-  accessToken: "PASTE_CAPTURED_TOKEN",       // from the app (README Option B)
+  accessToken: "PASTE_CAPTURED_TOKEN",       // from the browser (README Option B)
   baseUrl: "https://api-cloudfront.life360.com",
   useImpersonation: true,                    // cycletls TLS fingerprint
   updateInterval: 60 * 1000
@@ -96,9 +96,12 @@ worth knowing:
 - **`fetch` is blocked; cycletls works.** Data requests over native `fetch` get
   a Cloudflare `403`; only the cycletls transport gets through. Keep
   `useImpersonation: true`.
-- **Brotli → empty bodies.** cycletls doesn't decode Cloudflare's default Brotli
-  compression, which shows up as an HTTP `200` with an *empty body*. The module
-  sends `Accept-Encoding: gzip, deflate` to avoid this; don't override it.
+- **Compression → empty bodies.** cycletls doesn't auto-decompress responses, so
+  a compressed reply (Cloudflare defaults to Brotli) arrives as an HTTP `200`
+  with an *empty body*. The module works around this by negotiating the
+  `Accept-Encoding` itself (preferring uncompressed `identity`) and retrying with
+  an alternate encoding if a `200` still comes back empty — so leave
+  `Accept-Encoding` unset and let the module manage it.
 
 ## Configuration
 
@@ -204,17 +207,19 @@ default). This is why `npm install` is required.
 - You can force `fetch`-only behaviour with `useImpersonation: false` (expect
   `403`s on most setups — this is confirmed for real accounts).
 
-**Brotli / empty-body caveat.** cycletls does not decode Cloudflare's default
-Brotli (`br`) compression, which surfaces as an HTTP `200` with an *empty body*
-— a silent "success" with no data. The module requests
-`Accept-Encoding: gzip, deflate` on every call to avoid this; leave that header
-alone. `diagnose.js` explicitly flags a decoded-but-empty 200 rather than
-reporting a false ✅.
+**Compression / empty-body caveat.** cycletls does not auto-decompress
+responses, so a compressed reply (Cloudflare defaults to Brotli, `br`) surfaces
+as an HTTP `200` with an *empty body* — a silent "success" with no data. The
+module negotiates `Accept-Encoding` itself (preferring uncompressed `identity`,
+then falling back to letting cycletls manage gzip) and retries automatically if
+a `200` comes back empty, remembering whichever strategy yields a real body.
+`diagnose.js` sweeps the same encodings and explicitly flags an empty 200 rather
+than reporting a false ✅.
 
 > **Honesty note:** the JA3/JA4 explanation is well-supported but not officially
 > confirmed by Life360 (there is no official API). If impersonation stops
-> working, capturing a token from the app
-> ([Option B](#option-b--capture-a-token-from-the-real-app-most-reliable-required-for-otp-accounts))
+> working, capturing a token from the browser
+> ([Option B](#option-b--capture-a-token-from-the-browser-most-reliable-required-for-otp-accounts))
 > is the fallback that always works.
 
 ## How authentication works
@@ -268,7 +273,9 @@ The module handles this as gracefully as the API allows:
 > `email + password` login (Option A) and `get-token.js` **cannot work for you at
 > all** — regardless of Cloudflare. This is common on newer/2FA-enabled accounts.
 >
-> **Your only route is Option B: capture a token from the app.** Then verify it
+> **Your only route is [Option B: capture a token from the browser](#option-b--capture-a-token-from-the-browser-most-reliable-required-for-otp-accounts).**
+> Life360's web login accepts the emailed code, so you can grab a token with just
+> a browser and its Developer Tools — no phone or proxy needed. Then verify it
 > with `node diagnose.js --token` and put it in `accessToken` (leave
 > `email`/`password` unset). Because there's no password login, the module can't
 > auto-refresh — you'll re-capture when the token is revoked.
@@ -308,19 +315,24 @@ the module picks it up with no config edit:
 node get-token.js --save
 ```
 
-### Option B — capture a token from the real app (most reliable; required for OTP accounts)
+### Option B — capture a token from the browser (most reliable; required for OTP accounts)
 
-The Life360 app on your phone has already completed login (including any emailed
-code) and holds a valid bearer token. Lifting that token bypasses **both** the
-Cloudflare login gate **and** the passwordless/2FA problem:
+Life360's **web login** accepts the emailed 6-digit code, so you can complete
+sign-in in an ordinary browser and lift the resulting bearer token straight from
+the network traffic — **no phone and no proxy required**. This bypasses **both**
+the Cloudflare login gate **and** the passwordless/2FA problem, and it's the
+easiest reliable method.
 
-1. Put an intercepting proxy in front of your phone — [HTTP Toolkit](https://httptoolkit.com/)
-   is the easiest, or use mitmproxy / Charles.
-2. Open the Life360 app and let it load your family.
-3. Find any request to `api.life360.com` / `api-cloudfront.life360.com`
-   (e.g. `/v3/circles`).
-4. In its request headers, copy the value after `Authorization: Bearer ` — that
-   string is your `accessToken`.
+1. Open [https://life360.com/login](https://life360.com/login) in your browser.
+2. Open **Developer Tools** (`F12`, or right-click → *Inspect*) and switch to
+   the **Network** tab. Make sure recording is on (the record icon is red/filled)
+   and leave DevTools open.
+3. **Log in** with your email address and the one-time code Life360 emails you.
+4. In the Network tab, find the `POST` request named **`token`** (its URL ends in
+   `/oauth2/token`). Typing `token` into the filter box makes it easy to find.
+5. Click that request, open its **Response** (or *Preview*) tab, and copy the
+   value of **`access_token`** — that long string (without the surrounding
+   quotes) is your `accessToken`.
 
 **Verify it before editing config** — this GETs the real data endpoint on both
 hosts and both transports and tells you exactly which to use:
@@ -349,7 +361,22 @@ config: {
 > ([#84](https://github.com/pnbruckner/ha-life360/issues/84)). The `--token` test
 > confirms whether it does on your setup before you commit to it.
 
-### Option C — plain `curl` (usually blocked)
+### Option C — capture a token from the mobile app (fallback)
+
+If the browser method above doesn't work for you, the Life360 app on your phone
+has also already completed login and holds a valid bearer token:
+
+1. Put an intercepting proxy in front of your phone — [HTTP Toolkit](https://httptoolkit.com/)
+   is the easiest, or use mitmproxy / Charles.
+2. Open the Life360 app and let it load your family.
+3. Find any request to `api.life360.com` / `api-cloudfront.life360.com`
+   (e.g. `/v3/circles`).
+4. In its request headers, copy the value after `Authorization: Bearer ` — that
+   string is your `accessToken`.
+
+Verify and apply it exactly as in Option B (`node diagnose.js --token`).
+
+### Option D — plain `curl` (usually blocked)
 
 For completeness only. `curl`'s TLS fingerprint is one of the ones Cloudflare
 tends to block, so this **often returns `403`** — but it's occasionally useful
@@ -396,8 +423,8 @@ fetch) and prints, for each, the status, the `Server` / `cf-ray` /
 | Verdict | Meaning | What to do |
 |---------|---------|------------|
 | ✅ **SUCCESS** | That host+transport works | Set `baseUrl` to that host (and keep `useImpersonation: true` if cycletls won). |
-| ⛔ **CLOUDFLARE BLOCK** | TLS fingerprint rejected (HTML body, `cf-ray` present) | A token won't help. Try a different `ja3`, or capture a token from the app. |
-| 🔑 **LIFE360 REJECTED** | Got *through* Cloudflare; login refused (JSON body) | Check email/password and `authToken`; if the account has 2FA, use app capture. |
+| ⛔ **CLOUDFLARE BLOCK** | TLS fingerprint rejected (HTML body, `cf-ray` present) | A token won't help. Try a different `ja3`, or capture a token from the browser. |
+| 🔑 **LIFE360 REJECTED** | Got *through* Cloudflare; login refused (JSON body) | Check email/password and `authToken`; if the account has 2FA, capture a token from the browser. |
 | ⏳ **RATE LIMITED** | `429` | Increase `updateInterval` and wait before retrying. |
 
 This instantly tells you whether you have a **TLS problem** (Cloudflare) or a
@@ -413,8 +440,8 @@ The most common fixes, in order:
    `TLS impersonation enabled (cycletls)`, *not* a fallback-to-fetch warning. If
    it fell back, `npm install` didn't complete for your platform.
 3. **Try a different `ja3`** — Cloudflare may have blocked the built-in one.
-4. **Capture a token from the app** — bypasses both TLS and 2FA
-   ([Option B](#option-b--capture-a-token-from-the-real-app-most-reliable)).
+4. **Capture a token from the browser** — bypasses both TLS and 2FA
+   ([Option B](#option-b--capture-a-token-from-the-browser-most-reliable-required-for-otp-accounts)).
 
 ## Troubleshooting
 

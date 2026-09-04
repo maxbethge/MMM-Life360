@@ -20,7 +20,9 @@
  *   LIFE360_EMAIL=... LIFE360_PASSWORD=... node diagnose.js
  *
  * Usage (token test — for accounts that sign in with an emailed code, i.e.
- * no password login is possible; capture a bearer token from the app first):
+ * no password login is possible; capture a bearer token from the browser first:
+ * log in at life360.com/login with DevTools open and copy access_token from the
+ * POST /oauth2/token response — see README Option B):
  *   node diagnose.js --token              # prompts for the token
  *   LIFE360_TOKEN=... node diagnose.js
  * This GETs the real /v3/circles data endpoint to prove the token works
@@ -202,7 +204,20 @@ async function tryFetch(host, bodyString, headers) {
 }
 
 // --- token-test mode: GET a data endpoint with a captured bearer token -----
-async function getCycle(host, path, headers) {
+// cycletls does not auto-decompress responses. If we let Cloudflare pick an
+// encoding (Brotli by default) cycletls hands back an unreadable body, which
+// shows up as a 200 with an EMPTY body. So we sweep several Accept-Encoding
+// strategies and report which one actually returns a real (JSON) body:
+//   identity        → ask for uncompressed; nothing to decode (most robust)
+//   (client-managed)→ send no Accept-Encoding; cycletls adds+decodes gzip
+//   gzip, deflate   → the old default (often still empty on cycletls)
+const CYCLE_ENCODINGS = [
+  { label: "identity", value: "identity" },
+  { label: "client-managed", value: null },
+  { label: "gzip, deflate", value: "gzip, deflate" }
+];
+
+async function getCycle(host, path, baseHeaders) {
   let initCycleTLS;
   try {
     initCycleTLS = require("cycletls");
@@ -212,14 +227,36 @@ async function getCycle(host, path, headers) {
   let client;
   try {
     client = await initCycleTLS();
-    const resp = await client(
-      `${host}${path}`,
-      { headers, ja3: JA3, userAgent: USER_AGENT, timeout: 30 },
-      "get"
-    );
-    const bodyText =
-      typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body);
-    return { status: resp.status, headers: resp.headers || {}, bodyText };
+    let last = null;
+    for (const enc of CYCLE_ENCODINGS) {
+      const headers = Object.assign({}, baseHeaders);
+      if (enc.value) {
+        headers["Accept-Encoding"] = enc.value;
+      } else {
+        delete headers["Accept-Encoding"];
+      }
+      const resp = await client(
+        `${host}${path}`,
+        { headers, ja3: JA3, userAgent: USER_AGENT, timeout: 30 },
+        "get"
+      );
+      const bodyText =
+        typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body);
+      last = {
+        status: resp.status,
+        headers: resp.headers || {},
+        bodyText,
+        encoding: enc.label
+      };
+      const ok2xx = resp.status >= 200 && resp.status < 300;
+      const hasBody = !!(bodyText && bodyText.trim());
+      // Stop at the first strategy that yields a usable body, OR any non-2xx
+      // (an empty 2xx just means "this encoding failed — try the next one").
+      if (!ok2xx || hasBody) {
+        return last;
+      }
+    }
+    return last;
   } catch (e) {
     return { error: e.message };
   } finally {
@@ -251,11 +288,11 @@ async function getFetch(host, path, headers) {
 }
 
 async function testToken(token) {
+  // No Accept-Encoding here: getCycle() sweeps encodings for cycletls, and
+  // native fetch decodes gzip/deflate/br on its own.
   const headers = {
     Authorization: `Bearer ${token}`,
     Accept: "application/json",
-    // gzip/deflate only — cycletls may not decode Brotli, giving empty bodies.
-    "Accept-Encoding": "gzip, deflate",
     "cache-control": "no-cache",
     "User-Agent": USER_AGENT
   };
@@ -263,12 +300,13 @@ async function testToken(token) {
 
   log("Testing your captured token against the /v3/circles DATA endpoint…");
   log("(this is what the module actually calls on every refresh)");
+  log("cycletls rows sweep Accept-Encoding: identity → client-managed → gzip.");
 
   let winner = null;
   for (const host of HOSTS) {
     const c = await getCycle(host, path, headers);
     if (report(`cycletls  →  ${host}${path}`, c)) {
-      winner = { host, transport: "cycletls" };
+      winner = { host, transport: "cycletls", encoding: c.encoding };
     }
     const f = await getFetch(host, path, headers);
     if (report(`fetch     →  ${host}${path}`, f)) {
@@ -285,12 +323,18 @@ async function testToken(token) {
     log(
       `   useImpersonation: ${winner.transport === "cycletls" ? "true" : "false"}`
     );
+    if (winner.transport === "cycletls" && winner.encoding) {
+      log(
+        `   (the module auto-negotiates this; the winning encoding was ` +
+          `"${winner.encoding}")`
+      );
+    }
     log("   (leave email/password unset — this account can't password-login)");
     log("Then restart MagicMirror. Re-run this when the token expires.");
   } else {
     log("The token did not work on any host/transport. Either it's already");
-    log("expired (grab a fresh one from the app) or the data endpoints are");
-    log("Cloudflare-blocked for your setup too — see the verdicts above.");
+    log("expired (grab a fresh one from the browser — README Option B) or the");
+    log("data endpoints are Cloudflare-blocked for your setup too — see above.");
   }
 }
 
@@ -310,6 +354,7 @@ function report(label, result) {
   log(`   server : ${info.server || "?"}`);
   if (info.cfRay) log(`   cf-ray : ${info.cfRay}`);
   if (info.cfMitigated) log(`   cf-mit : ${info.cfMitigated}`);
+  if (result.encoding) log(`   accEnc : ${result.encoding}`);
   log(`   body   : ${bodyBrief(result.bodyText)}`);
   log(`   verdict: ${info.verdict}`);
   return info.success ? result : null;
@@ -323,7 +368,8 @@ async function main() {
   // Token-test mode: `node diagnose.js --token` (or LIFE360_TOKEN=…).
   // Verifies a captured bearer token against the real data endpoint. This is
   // the right mode for accounts that sign in with an emailed code (no password
-  // login is possible), where you must capture a token from the app.
+  // login is possible), where you capture a token from the browser (log in at
+  // life360.com/login with DevTools open — see README Option B).
   const tokenMode = flags.includes("--token") || !!process.env.LIFE360_TOKEN;
   if (tokenMode) {
     let token = process.env.LIFE360_TOKEN;
@@ -354,7 +400,9 @@ async function main() {
     Authorization: `Basic ${AUTH_TOKEN}`,
     "Content-Type": "application/x-www-form-urlencoded",
     Accept: "application/json",
-    "Accept-Encoding": "gzip, deflate",
+    // Ask for an uncompressed body: cycletls doesn't auto-decode compression,
+    // so a compressed reply would arrive as an empty 200. identity sidesteps it.
+    "Accept-Encoding": "identity",
     "cache-control": "no-cache",
     "User-Agent": USER_AGENT
   };
@@ -385,10 +433,10 @@ async function main() {
   } else {
     log("Nothing worked. Interpret the verdicts above:");
     log("   • All ⛔ CLOUDFLARE  → TLS blocking even via cycletls. Try a");
-    log("     different ja3, or capture a token from the app (README Option B).");
+    log("     different ja3, or capture a token in the browser (README Option B).");
     log("   • Any 🔑 LIFE360 REJECTED → the request got THROUGH Cloudflare but");
     log("     the login was refused: check email/password, the authToken, or");
-    log("     whether the account uses 2FA (then use app capture).");
+    log("     whether the account uses 2FA (then capture a token in the browser).");
     log("   • ⏳ RATE LIMITED → wait a while before trying again.");
   }
 }

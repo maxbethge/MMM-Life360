@@ -90,6 +90,9 @@ async function postToken(bodyString) {
     Authorization: `Basic ${AUTH_TOKEN}`,
     "Content-Type": "application/x-www-form-urlencoded",
     Accept: "application/json",
+    // Request an uncompressed body: cycletls doesn't auto-decode compression, so
+    // a compressed reply would arrive as an empty 200. identity avoids that.
+    "Accept-Encoding": "identity",
     "cache-control": "no-cache",
     "User-Agent": USER_AGENT
   };

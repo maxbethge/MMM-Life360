@@ -140,14 +140,14 @@ module.exports = NodeHelper.create({
 
   /** Mobile-app-style headers shared by every request. */
   mobileHeaders(extra) {
+    // NB: Accept-Encoding is intentionally NOT set here. cycletls only decodes
+    // a compressed response reliably when we let it manage the encoding itself
+    // (a manually-set Accept-Encoding disables its auto-decompression, yielding
+    // an HTTP 200 with an empty body). httpRequest() negotiates the encoding
+    // per-transport; native fetch/undici decodes gzip/deflate/br on its own.
     return Object.assign(
       {
         Accept: "application/json",
-        // Only request encodings cycletls can decode. Cloudflare defaults to
-        // Brotli (`br`), which some cycletls builds return UN-decoded — leaving
-        // an empty body on an otherwise-200 response. Restricting to gzip/
-        // deflate keeps bodies readable across transports.
-        "Accept-Encoding": "gzip, deflate",
         "cache-control": "no-cache",
         "User-Agent": this.userAgent()
       },
@@ -211,33 +211,83 @@ module.exports = NodeHelper.create({
     const client = await this.getCycleClient();
     if (client) {
       try {
-        const resp = await client(
-          url,
-          {
-            body: body || "",
-            headers,
-            ja3: this.ja3(),
-            userAgent: headers["User-Agent"] || this.userAgent(),
-            timeout: 30,
-            disableRedirect: false
-          },
-          method.toLowerCase()
-        );
+        // cycletls does not auto-decompress: if we let Cloudflare pick an
+        // encoding (Brotli by default) it hands back a body cycletls can't
+        // read, surfacing as a 200 with an EMPTY body. We therefore control
+        // Accept-Encoding ourselves. `identity` (uncompressed) is the most
+        // robust — there's nothing to decode; "" lets cycletls add+decode gzip.
+        // `cycleEncoding` remembers the strategy that last produced a real body
+        // so we normally issue a single request; the remaining strategies stay
+        // as fallbacks in case that one ever comes back empty.
+        const defaults = ["identity", ""];
+        const strategies =
+          this.cycleEncoding !== undefined
+            ? [this.cycleEncoding, ...defaults.filter((e) => e !== this.cycleEncoding)]
+            : defaults;
 
-        // cycletls returns body as a string, or a parsed object for JSON.
-        const bodyText =
-          typeof resp.body === "string"
-            ? resp.body
-            : JSON.stringify(resp.body);
+        let last = null;
+        for (const enc of strategies) {
+          const hdrs = Object.assign({}, headers);
+          if (enc) {
+            hdrs["Accept-Encoding"] = enc;
+          } else {
+            delete hdrs["Accept-Encoding"];
+          }
 
-        return {
-          status: resp.status,
-          ok: resp.status >= 200 && resp.status < 300,
-          statusText: "",
-          bodyText,
-          headers: resp.headers || {},
-          transport: "cycletls"
-        };
+          const resp = await client(
+            url,
+            {
+              body: body || "",
+              headers: hdrs,
+              ja3: this.ja3(),
+              userAgent: hdrs["User-Agent"] || this.userAgent(),
+              timeout: 30,
+              disableRedirect: false
+            },
+            method.toLowerCase()
+          );
+
+          // cycletls returns body as a string, or a parsed object for JSON.
+          const bodyText =
+            typeof resp.body === "string"
+              ? resp.body
+              : JSON.stringify(resp.body);
+
+          last = {
+            status: resp.status,
+            ok: resp.status >= 200 && resp.status < 300,
+            statusText: "",
+            bodyText,
+            headers: resp.headers || {},
+            transport: "cycletls"
+          };
+
+          const emptyOk2xx = last.ok && (!bodyText || !bodyText.trim());
+          if (!emptyOk2xx) {
+            // Got a usable answer (real body, or a non-2xx worth surfacing).
+            // Remember the encoding that produced a real body so future calls
+            // skip the sweep; update it if a fallback just beat a stale choice.
+            if (last.ok && this.cycleEncoding !== enc) {
+              this.cycleEncoding = enc;
+              this.log(
+                `cycletls response encoding negotiated: ${
+                  enc ? `Accept-Encoding: ${enc}` : "(client-managed)"
+                }`
+              );
+            }
+            return last;
+          }
+          // 2xx but empty — a compressed body cycletls couldn't decode; try the
+          // next strategy before giving up.
+          this.warn(
+            `cycletls got HTTP ${last.status} with an empty body using ` +
+              `${enc ? `Accept-Encoding: ${enc}` : "client-managed encoding"}; ` +
+              "trying another encoding"
+          );
+        }
+        // Every strategy returned an empty 2xx — return the last so apiGet()'s
+        // empty-body guard reports a clear, actionable error.
+        return last;
       } catch (e) {
         // A transport-level failure (not an HTTP error) — try fetch as a
         // last resort rather than failing the whole poll.
@@ -584,13 +634,15 @@ module.exports = NodeHelper.create({
     }
 
     // A 200 with an empty body almost always means the response was compressed
-    // with an encoding the transport didn't decode (Cloudflare Brotli). We send
-    // Accept-Encoding: gzip, deflate to avoid this, but guard anyway.
+    // with an encoding the transport didn't decode (Cloudflare Brotli via
+    // cycletls). httpRequest() already retries with alternate encodings; if we
+    // still have nothing, surface a clear, actionable error.
     if (!resp.bodyText || !resp.bodyText.trim()) {
       throw new Error(
         `empty response body from ${apiPath} (HTTP ${resp.status} via ` +
-          `${resp.transport}). Likely an undecoded compressed response; ensure ` +
-          "requests send `Accept-Encoding: gzip, deflate`."
+          `${resp.transport}). The response was compressed with an encoding ` +
+          "cycletls could not decode. Try updating cycletls (`npm install`), " +
+          "or run `node diagnose.js --token` to find a working encoding."
       );
     }
 
