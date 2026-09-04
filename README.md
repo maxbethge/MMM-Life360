@@ -131,7 +131,10 @@ Add the module to the `modules` array in `~/MagicMirror/config/config.js`:
     showList: true,
     showAddress: true,
     showBattery: true,
-    showLastSeen: true
+    showLastSeen: true,
+
+    // --- Map appearance ---
+    darkMap: true  // dark tiles suit an always-on mirror
   }
 }
 ```
@@ -170,8 +173,9 @@ Add the module to the `modules` array in `~/MagicMirror/config/config.js`:
 | `interactiveMap` | boolean | `false`                                | Allow dragging/zooming the map. |
 | `mapZoom`        | number  | `13`                                   | Zoom level when a single member is shown. |
 | `maxZoom`        | number  | `16`                                   | Cap the auto-zoom when fitting everyone on the map. Lower = more zoomed out (e.g. `13` for a wider view). |
-| `mapTileUrl`     | string  | OpenStreetMap tiles                    | Leaflet tile URL template. |
-| `mapAttribution` | string  | OSM attribution                        | Map attribution text. |
+| `darkMap`        | boolean | `false`                                | Use a built-in dark tile theme (CARTO Dark Matter) instead of the light OpenStreetMap theme. Ignored if `mapTileUrl` is set. |
+| `mapTileUrl`     | string  | `""` (built-in theme)                  | Explicit Leaflet tile URL template. Overrides `darkMap` entirely; pair with `mapAttribution`. Leave `""` to use the theme chosen by `darkMap`. |
+| `mapAttribution` | string  | `""` (theme default)                   | Map attribution text. `""` uses the built-in attribution for the active theme. |
 | `maxMembers`     | number  | `0`                                    | Limit the number of members shown (0 = all). |
 
 ## Cloudflare TLS fingerprinting (important)

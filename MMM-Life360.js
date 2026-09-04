@@ -84,8 +84,15 @@ Module.register("MMM-Life360", {
     // --- Map appearance -----------------------------------------------------
     mapZoom: 13, // zoom used when only one member is shown
     maxZoom: 16, // cap auto-zoom when fitting everyone (lower = more zoomed out)
-    mapTileUrl: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-    mapAttribution: "&copy; OpenStreetMap contributors",
+    // Dark tiles suit an always-on mirror. true = built-in CARTO Dark Matter
+    // theme; false (default) = the light OSM theme. Ignored when mapTileUrl is
+    // set (an explicit tile URL always wins).
+    darkMap: false,
+    // Leave "" to use the built-in theme picked by darkMap. Set an explicit
+    // Leaflet tile URL template here to override both themes entirely; pair it
+    // with mapAttribution.
+    mapTileUrl: "",
+    mapAttribution: "",
 
     // --- Misc ---------------------------------------------------------------
     maxMembers: 0, // 0 = show everyone
@@ -353,8 +360,10 @@ Module.register("MMM-Life360", {
           tap: this.config.interactiveMap
         }).setView([0, 0], this.config.mapZoom);
 
-        L.tileLayer(this.config.mapTileUrl, {
-          attribution: this.config.mapAttribution,
+        const theme = this.tileTheme();
+        L.tileLayer(theme.url, {
+          attribution: theme.attribution,
+          subdomains: theme.subdomains,
           maxZoom: 19
         }).addTo(this.map);
 
@@ -425,6 +434,37 @@ Module.register("MMM-Life360", {
         maxZoom: this.config.maxZoom
       });
     }
+  },
+
+  /**
+   * Resolve which tile layer to use. An explicit mapTileUrl always wins;
+   * otherwise darkMap picks between the built-in dark (CARTO Dark Matter) and
+   * light (OpenStreetMap) themes. CARTO tiles use the {s} subdomains a,b,c,d.
+   */
+  tileTheme() {
+    if (this.config.mapTileUrl) {
+      return {
+        url: this.config.mapTileUrl,
+        attribution:
+          this.config.mapAttribution || "&copy; OpenStreetMap contributors",
+        subdomains: "abc"
+      };
+    }
+    if (this.config.darkMap) {
+      return {
+        url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+        attribution:
+          this.config.mapAttribution ||
+          "&copy; OpenStreetMap contributors &copy; CARTO",
+        subdomains: "abcd"
+      };
+    }
+    return {
+      url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      attribution:
+        this.config.mapAttribution || "&copy; OpenStreetMap contributors",
+      subdomains: "abc"
+    };
   },
 
   /**
