@@ -211,25 +211,30 @@ module.exports = NodeHelper.create({
     const client = await this.getCycleClient();
     if (client) {
       try {
-        // cycletls does not auto-decompress: if we let Cloudflare pick an
-        // encoding (Brotli by default) it hands back a body cycletls can't
-        // read, surfacing as a 200 with an EMPTY body. We therefore control
-        // Accept-Encoding ourselves. `identity` (uncompressed) is the most
-        // robust — there's nothing to decode; "" lets cycletls add+decode gzip.
-        // `cycleEncoding` remembers the strategy that last produced a real body
-        // so we normally issue a single request; the remaining strategies stay
-        // as fallbacks in case that one ever comes back empty.
-        const defaults = ["identity", ""];
-        const strategies =
-          this.cycleEncoding !== undefined
-            ? [this.cycleEncoding, ...defaults.filter((e) => e !== this.cycleEncoding)]
-            : defaults;
+        // cycletls can return an HTTP 200 with an EMPTY body for two reasons:
+        //   1. a compressed reply it didn't decode (Cloudflare defaults to
+        //      Brotli) — avoided by asking for `identity` (uncompressed);
+        //   2. it silently drops the body of a Cloudflare HTTP/2 response — a
+        //      known cycletls bug, avoided with `forceHTTP1: true`.
+        // We negotiate over BOTH dimensions: {Accept-Encoding, forceHTTP1}.
+        // `cycleCombo` remembers the combo that last produced a real body so we
+        // normally issue a single request; the rest stay as ordered fallbacks.
+        const defaults = [
+          { enc: "identity", http1: true },
+          { enc: "identity", http1: false },
+          { enc: "", http1: true },
+          { enc: "", http1: false }
+        ];
+        const same = (a, b) => a.enc === b.enc && a.http1 === b.http1;
+        const combos = this.cycleCombo
+          ? [this.cycleCombo, ...defaults.filter((c) => !same(c, this.cycleCombo))]
+          : defaults;
 
         let last = null;
-        for (const enc of strategies) {
+        for (const combo of combos) {
           const hdrs = Object.assign({}, headers);
-          if (enc) {
-            hdrs["Accept-Encoding"] = enc;
+          if (combo.enc) {
+            hdrs["Accept-Encoding"] = combo.enc;
           } else {
             delete hdrs["Accept-Encoding"];
           }
@@ -242,7 +247,8 @@ module.exports = NodeHelper.create({
               ja3: this.ja3(),
               userAgent: hdrs["User-Agent"] || this.userAgent(),
               timeout: 30,
-              disableRedirect: false
+              disableRedirect: false,
+              forceHTTP1: combo.http1
             },
             method.toLowerCase()
           );
@@ -265,27 +271,26 @@ module.exports = NodeHelper.create({
           const emptyOk2xx = last.ok && (!bodyText || !bodyText.trim());
           if (!emptyOk2xx) {
             // Got a usable answer (real body, or a non-2xx worth surfacing).
-            // Remember the encoding that produced a real body so future calls
-            // skip the sweep; update it if a fallback just beat a stale choice.
-            if (last.ok && this.cycleEncoding !== enc) {
-              this.cycleEncoding = enc;
+            // Remember the winning combo so future calls skip the sweep; update
+            // it if a fallback just beat a stale choice.
+            if (last.ok && (!this.cycleCombo || !same(this.cycleCombo, combo))) {
+              this.cycleCombo = combo;
               this.log(
-                `cycletls response encoding negotiated: ${
-                  enc ? `Accept-Encoding: ${enc}` : "(client-managed)"
-                }`
+                `cycletls transport negotiated: ${
+                  combo.enc ? `Accept-Encoding: ${combo.enc}` : "client-managed"
+                }, ${combo.http1 ? "HTTP/1.1" : "HTTP/2"}`
               );
             }
             return last;
           }
-          // 2xx but empty — a compressed body cycletls couldn't decode; try the
-          // next strategy before giving up.
+          // 2xx but empty — this combo couldn't retrieve the body; try the next.
           this.warn(
-            `cycletls got HTTP ${last.status} with an empty body using ` +
-              `${enc ? `Accept-Encoding: ${enc}` : "client-managed encoding"}; ` +
-              "trying another encoding"
+            `cycletls got HTTP ${last.status} with an empty body (${
+              combo.enc ? `Accept-Encoding: ${combo.enc}` : "client-managed"
+            }, ${combo.http1 ? "HTTP/1.1" : "HTTP/2"}); trying another combo`
           );
         }
-        // Every strategy returned an empty 2xx — return the last so apiGet()'s
+        // Every combo returned an empty 2xx — return the last so apiGet()'s
         // empty-body guard reports a clear, actionable error.
         return last;
       } catch (e) {
