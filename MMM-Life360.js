@@ -338,8 +338,9 @@ Module.register("MMM-Life360", {
         const icon = L.divIcon({
           className: "mmm-life360-marker",
           html: pin, // Leaflet accepts an HTMLElement here
-          iconSize: [28, 28],
-          iconAnchor: [14, 14]
+          // Keep in sync with .mmm-life360-pin in the CSS (20×20; anchor = half).
+          iconSize: [20, 20],
+          iconAnchor: [10, 10]
         });
 
         // Popup content built with DOM + textContent (no HTML strings).
