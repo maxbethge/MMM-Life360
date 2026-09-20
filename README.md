@@ -134,7 +134,8 @@ Add the module to the `modules` array in `~/MagicMirror/config/config.js`:
     showLastSeen: true,
 
     // --- Map appearance ---
-    darkMap: true  // dark tiles suit an always-on mirror
+    darkMap: true,          // dark tiles suit an always-on mirror
+    cartoApiKey: "YOUR_KEY" // free key from https://carto.com/basemaps/apikey
   }
 }
 ```

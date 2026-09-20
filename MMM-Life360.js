@@ -88,6 +88,11 @@ Module.register("MMM-Life360", {
     // theme; false (default) = the light OSM theme. Ignored when mapTileUrl is
     // set (an explicit tile URL always wins).
     darkMap: false,
+    // CARTO's basemaps now require a free API key (get one at
+    // https://carto.com/basemaps/apikey) — without it, tiles load with an
+    // "API key required" watermark. Only needed when darkMap is true; the
+    // light OSM theme never needs a key.
+    cartoApiKey: "",
     // Leave "" to use the built-in theme picked by darkMap. Set an explicit
     // Leaflet tile URL template here to override both themes entirely; pair it
     // with mapAttribution.
@@ -451,8 +456,16 @@ Module.register("MMM-Life360", {
       };
     }
     if (this.config.darkMap) {
+      if (!this.config.cartoApiKey) {
+        Log.warn(
+          `[${this.name}] darkMap is enabled but cartoApiKey is not set — ` +
+            "CARTO now requires a free API key (https://carto.com/basemaps/apikey) " +
+            "or tiles load with an 'API key required' watermark"
+        );
+      }
+      const key = encodeURIComponent(this.config.cartoApiKey || "");
       return {
-        url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+        url: `https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=${key}`,
         attribution:
           this.config.mapAttribution ||
           "&copy; OpenStreetMap contributors &copy; CARTO",
