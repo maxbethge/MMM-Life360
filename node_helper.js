@@ -38,6 +38,7 @@ const NodeHelper = require("node_helper");
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
+const crypto = require("crypto");
 
 const MODULE_NAME = "MMM-Life360";
 // Two known API hosts. `api.life360.com` is the one the community library that
@@ -412,6 +413,17 @@ module.exports = NodeHelper.create({
   },
 
   // --- token cache (disk) ---------------------------------------------------
+  /**
+   * Fingerprint of the accessToken currently in config ("" if none). Stored with
+   * the cached token so a cache written under a different config token is
+   * ignored — otherwise a stale cache would silently beat a freshly pasted
+   * config token until the old one got a 401.
+   */
+  configTokenFingerprint() {
+    const t = this.config && this.config.accessToken;
+    return t ? crypto.createHash("sha256").update(t).digest("hex").slice(0, 16) : "";
+  },
+
   loadCachedToken() {
     if (!this.cacheEnabled()) {
       return null;
@@ -419,7 +431,14 @@ module.exports = NodeHelper.create({
     try {
       const raw = fs.readFileSync(this.tokenCachePath(), "utf8");
       const obj = JSON.parse(raw);
-      return obj && obj.access_token ? obj.access_token : null;
+      if (!obj || !obj.access_token) {
+        return null;
+      }
+      if ((obj.configToken || "") !== this.configTokenFingerprint()) {
+        this.log("ignoring cached token: config accessToken has changed");
+        return null;
+      }
+      return obj.access_token;
     } catch (e) {
       return null; // no cache yet / unreadable — treat as "no token"
     }
@@ -433,7 +452,11 @@ module.exports = NodeHelper.create({
     try {
       fs.writeFileSync(
         file,
-        JSON.stringify({ access_token: token, savedAt: new Date().toISOString() }),
+        JSON.stringify({
+          access_token: token,
+          configToken: this.configTokenFingerprint(),
+          savedAt: new Date().toISOString()
+        }),
         { mode: 0o600 }
       );
       try {

@@ -60,7 +60,7 @@ Module.register("MMM-Life360", {
 
     // --- Refresh schedule ---------------------------------------------------
     updateInterval: 60 * 1000, // how often to poll Life360 (ms)
-    retryDelay: 15 * 1000, // wait before retrying after a failure (ms)
+    retryDelay: 15 * 1000, // wait before an extra retry after a failed poll (ms)
     animationSpeed: 1000, // DOM fade animation (ms)
 
     // --- Sizing (all configurable) ------------------------------------------
@@ -79,6 +79,8 @@ Module.register("MMM-Life360", {
     showBattery: true,
     showLastSeen: true,
     showHeader: true,
+    showAvatars: true, // use profile pictures for pins and list (falls back to coloured initial)
+    avatarSize: 36, // map pin diameter in px
     interactiveMap: false, // allow dragging/zooming (usually off on a mirror)
 
     // --- Map appearance -----------------------------------------------------
@@ -100,8 +102,7 @@ Module.register("MMM-Life360", {
     mapAttribution: "",
 
     // --- Misc ---------------------------------------------------------------
-    maxMembers: 0, // 0 = show everyone
-    dateFormat: "HH:mm" // reserved for future use
+    maxMembers: 0 // 0 = show everyone in the list (the map always shows all)
   },
 
   requiresVersion: "2.1.0",
@@ -123,6 +124,8 @@ Module.register("MMM-Life360", {
     this.members = [];
     this.loaded = false;
     this.errorMessage = null;
+    this.hasData = false; // true once a poll has succeeded
+    this.retryTimer = null;
     this.map = null;
     this.markerLayer = null;
     this.mapContainer = null;
@@ -176,6 +179,24 @@ Module.register("MMM-Life360", {
     }, interval);
   },
 
+  /**
+   * After a failed poll, try once more after retryDelay rather than waiting a
+   * whole updateInterval. Skipped when retryDelay is falsy or a retry is
+   * already pending.
+   */
+  scheduleRetry() {
+    const delay = Number(this.config.retryDelay);
+    if (!delay || delay <= 0 || delay >= this.config.updateInterval || this.retryTimer) {
+      return;
+    }
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (this.errorMessage) {
+        this.sendConfig();
+      }
+    }, Math.max(1000, delay));
+  },
+
   socketNotificationReceived(notification, payload) {
     if (notification === "LIFE360_DATA") {
       Log.info(
@@ -183,6 +204,7 @@ Module.register("MMM-Life360", {
       );
       this.members = payload.members || [];
       this.errorMessage = null;
+      this.hasData = true;
       this.loaded = true;
       this.updateDom(this.config.animationSpeed);
       // Give the DOM a tick to attach before (re)drawing the map. renderMap()
@@ -194,6 +216,7 @@ Module.register("MMM-Life360", {
       this.errorMessage = payload.message;
       this.loaded = true;
       this.updateDom(this.config.animationSpeed);
+      this.scheduleRetry();
     }
   },
 
@@ -210,7 +233,7 @@ Module.register("MMM-Life360", {
       return wrapper;
     }
 
-    if (this.errorMessage) {
+    if (this.errorMessage && !this.hasData) {
       wrapper.classList.add("mmm-life360-status", "mmm-life360-error");
       // errorMessage may echo server-provided text; use textContent (no HTML).
       wrapper.textContent = `Life360: ${this.errorMessage}`;
@@ -222,6 +245,15 @@ Module.register("MMM-Life360", {
       header.className = "mmm-life360-header";
       header.textContent = "Family";
       wrapper.appendChild(header);
+    }
+
+    // A poll failed but we still have the last good data: keep showing it and
+    // add a small warning instead of blanking the whole module.
+    if (this.errorMessage) {
+      const warn = document.createElement("div");
+      warn.className = "mmm-life360-warning";
+      warn.textContent = `Life360: ${this.errorMessage} (showing last known data)`;
+      wrapper.appendChild(warn);
     }
 
     // --- Map ----------------------------------------------------------------
@@ -272,10 +304,16 @@ Module.register("MMM-Life360", {
     const row = document.createElement("li");
     row.className = "mmm-life360-member";
 
-    const dot = document.createElement("span");
-    dot.className = "mmm-life360-dot";
-    dot.style.backgroundColor = this.colorFor(index);
-    row.appendChild(dot);
+    if (this.config.showAvatars) {
+      const av = this.buildAvatar(member, index, 28);
+      av.classList.add("mmm-life360-list-avatar");
+      row.appendChild(av);
+    } else {
+      const dot = document.createElement("span");
+      dot.className = "mmm-life360-dot";
+      dot.style.backgroundColor = this.colorFor(index);
+      row.appendChild(dot);
+    }
 
     const info = document.createElement("div");
     info.className = "mmm-life360-info";
@@ -501,29 +539,63 @@ Module.register("MMM-Life360", {
     return order.map((key) => buckets.get(key));
   },
 
-  /** Build a normal teardrop pin for a single member at a location. */
-  buildSinglePin(point) {
-    const { member, index } = point;
+  /**
+   * Build a round avatar element: the member's profile picture inside a ring in
+   * their colour. Falls back to a coloured disc with their initial when avatars
+   * are off, there's no (https) picture URL, or the image fails to load. All
+   * member text/URLs are applied via DOM properties, never HTML strings.
+   */
+  buildAvatar(member, index, size) {
     const color = this.colorFor(index);
     const initial = (member.name || "?").trim().charAt(0).toUpperCase();
 
-    // Build the pin as a DOM node so the (member-derived) initial is set via
-    // textContent, never interpolated into an HTML string.
+    const el = document.createElement("div");
+    el.className = "mmm-life360-avatar";
+    el.style.width = `${size}px`;
+    el.style.height = `${size}px`;
+    el.style.borderColor = color;
+    el.style.background = color;
+    el.style.fontSize = `${Math.round(size * 0.45)}px`;
+
+    const showInitial = () => {
+      el.textContent = initial;
+    };
+
+    const url = member.avatar;
+    if (this.config.showAvatars && typeof url === "string" && /^https:\/\//i.test(url)) {
+      const img = document.createElement("img");
+      img.alt = "";
+      img.referrerPolicy = "no-referrer";
+      img.onerror = () => {
+        img.remove();
+        showInitial();
+      };
+      img.src = url;
+      el.appendChild(img);
+    } else {
+      showInitial();
+    }
+    return el;
+  },
+
+  /** Build the map pin for a single member at a location. */
+  buildSinglePin(point) {
+    const { member, index } = point;
+    const size = Number(this.config.avatarSize) || 36;
+
     const pin = document.createElement("div");
     pin.className = "mmm-life360-pin";
-    pin.style.background = color;
-    pin.textContent = initial;
+    pin.appendChild(this.buildAvatar(member, index, size));
 
     const icon = L.divIcon({
       className: "mmm-life360-marker",
       html: pin, // Leaflet accepts an HTMLElement here
-      // Keep in sync with .mmm-life360-pin in the CSS (20×20; anchor = half).
-      iconSize: [20, 20],
-      iconAnchor: [10, 10]
+      iconSize: [size, size],
+      iconAnchor: [size / 2, size / 2]
     });
 
     return L.marker([member.latitude, member.longitude], { icon }).bindPopup(
-      this.buildGroupPopup(point ? [point] : [])
+      this.buildGroupPopup([point])
     );
   },
 
@@ -534,67 +606,40 @@ Module.register("MMM-Life360", {
    * pie so the individual colours are all visible at a glance.
    */
   buildClusterPin(group) {
-    const size = 30; // px — a touch larger than a single pin so the count fits
-    const r = size / 2;
-    const count = group.length;
-
-    const NS = "http://www.w3.org/2000/svg";
-    const svg = document.createElementNS(NS, "svg");
-    svg.setAttribute("width", String(size));
-    svg.setAttribute("height", String(size));
-    svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
-    svg.classList.add("mmm-life360-cluster-svg");
-
-    // One wedge per member. A single full circle (count === 1) never reaches
-    // here, so every group has >= 2 slices.
-    const sliceAngle = (2 * Math.PI) / count;
-    group.forEach((point, i) => {
-      // Start at the top (−90°) and go clockwise.
-      const start = -Math.PI / 2 + i * sliceAngle;
-      const end = start + sliceAngle;
-      const x1 = r + r * Math.cos(start);
-      const y1 = r + r * Math.sin(start);
-      const x2 = r + r * Math.cos(end);
-      const y2 = r + r * Math.sin(end);
-      const largeArc = sliceAngle > Math.PI ? 1 : 0;
-
-      const path = document.createElementNS(NS, "path");
-      path.setAttribute(
-        "d",
-        `M ${r} ${r} L ${x1.toFixed(3)} ${y1.toFixed(3)} ` +
-          `A ${r} ${r} 0 ${largeArc} 1 ${x2.toFixed(3)} ${y2.toFixed(3)} Z`
-      );
-      path.setAttribute("fill", this.colorFor(point.index));
-      svg.appendChild(path);
-    });
-
-    // Centre disc + count so the number stays legible over the wedges.
-    const disc = document.createElementNS(NS, "circle");
-    disc.setAttribute("cx", String(r));
-    disc.setAttribute("cy", String(r));
-    disc.setAttribute("r", String(r * 0.55));
-    disc.setAttribute("class", "mmm-life360-cluster-center");
-    svg.appendChild(disc);
-
-    const label = document.createElementNS(NS, "text");
-    label.setAttribute("x", String(r));
-    label.setAttribute("y", String(r));
-    label.setAttribute("text-anchor", "middle");
-    label.setAttribute("dominant-baseline", "central");
-    label.setAttribute("class", "mmm-life360-cluster-count");
-    label.textContent = String(count); // count is a number — safe
-
-    svg.appendChild(label);
+    // Overlapping row of up to 3 avatars, plus a "+n" badge for the rest.
+    const size = Math.round((Number(this.config.avatarSize) || 36) * 0.85);
+    const overlap = Math.round(size * 0.35);
+    const MAX = 3;
+    const shown = group.slice(0, MAX);
+    const extra = group.length - shown.length;
 
     const wrap = document.createElement("div");
     wrap.className = "mmm-life360-cluster";
-    wrap.appendChild(svg);
+
+    shown.forEach((point, i) => {
+      const av = this.buildAvatar(point.member, point.index, size);
+      av.style.marginLeft = i === 0 ? "0" : `-${overlap}px`;
+      wrap.appendChild(av);
+    });
+    if (extra > 0) {
+      const more = document.createElement("div");
+      more.className = "mmm-life360-avatar mmm-life360-cluster-more";
+      more.style.width = `${size}px`;
+      more.style.height = `${size}px`;
+      more.style.marginLeft = `-${overlap}px`;
+      more.style.fontSize = `${Math.round(size * 0.4)}px`;
+      more.textContent = `+${extra}`; // number — safe
+      wrap.appendChild(more);
+    }
+
+    const slots = shown.length + (extra > 0 ? 1 : 0);
+    const width = size + (slots - 1) * (size - overlap);
 
     const icon = L.divIcon({
       className: "mmm-life360-marker",
       html: wrap,
-      iconSize: [size, size],
-      iconAnchor: [r, r]
+      iconSize: [width, size],
+      iconAnchor: [width / 2, size / 2]
     });
 
     const first = group[0].member;
