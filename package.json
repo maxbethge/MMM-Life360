@@ -1,6 +1,6 @@
 {
   "name": "mmm-life360",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "A MagicMirror² module that shows the location of all Life360 family members on a map and list, refreshing on a configurable schedule.",
   "keywords": [
     "MagicMirror",
