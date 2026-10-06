@@ -156,7 +156,7 @@ Add the module to the `modules` array in `~/MagicMirror/config/config.js`:
 | `tokenCachePath` | string  | `""`                                   | Where to store the cached token. `""` = `<module dir>/.life360-token.json`. |
 | `circleId`       | string  | `""`                                   | Restrict to a single circle. Empty = all circles you belong to. |
 | `updateInterval` | number  | `60000`                                | Refresh interval in ms (minimum 10 s enforced). |
-| `retryDelay`     | number  | `15000`                                | Reserved for retry backoff (ms). |
+| `retryDelay`     | number  | `15000`                                | After a failed poll, retry once after this delay instead of waiting a full `updateInterval` (ignored if >= `updateInterval`). |
 | `animationSpeed` | number  | `1000`                                 | DOM fade animation duration (ms). |
 | `moduleWidth`    | string  | `"400px"`                              | Overall module width (any CSS size). |
 | `moduleHeight`   | string  | `"auto"`                               | Overall module height. |
@@ -171,13 +171,16 @@ Add the module to the `modules` array in `~/MagicMirror/config/config.js`:
 | `showBattery`    | boolean | `true`                                 | Show battery level in the list. |
 | `showLastSeen`   | boolean | `true`                                 | Show a "last seen" relative time. |
 | `showHeader`     | boolean | `true`                                 | Show the "Family" header. |
+| `showAvatars`    | boolean | `true`                                 | Use members' Life360 profile pictures for map pins and the list (ring colour = member colour). Falls back to a coloured initial when there's no picture. `false` = coloured pins/dots. |
+| `avatarSize`     | number  | `36`                                   | Map pin diameter in px. Co-located members show as overlapping avatars (85% size) with a `+n` badge past three. |
 | `interactiveMap` | boolean | `false`                                | Allow dragging/zooming the map. |
 | `mapZoom`        | number  | `13`                                   | Zoom level when a single member is shown. |
 | `maxZoom`        | number  | `16`                                   | Cap the auto-zoom when fitting everyone on the map. Lower = more zoomed out (e.g. `13` for a wider view). |
-| `darkMap`        | boolean | `false`                                | Use a built-in dark tile theme (CARTO Dark Matter) instead of the light OpenStreetMap theme. Ignored if `mapTileUrl` is set. |
+| `darkMap`        | boolean | `false`                                | Use a built-in dark tile theme (CARTO Dark Matter) instead of the light OpenStreetMap theme. Ignored if `mapTileUrl` is set. Requires `cartoApiKey`. |
+| `cartoApiKey`    | string  | `""`                                   | Free API key for CARTO basemaps (get one at https://carto.com/basemaps/apikey). Only used when `darkMap` is `true`; without it, dark tiles load with an "API key required" watermark. Not needed for the light OSM theme. |
 | `mapTileUrl`     | string  | `""` (built-in theme)                  | Explicit Leaflet tile URL template. Overrides `darkMap` entirely; pair with `mapAttribution`. Leave `""` to use the theme chosen by `darkMap`. |
 | `mapAttribution` | string  | `""` (theme default)                   | Map attribution text. `""` uses the built-in attribution for the active theme. |
-| `maxMembers`     | number  | `0`                                    | Limit the number of members shown (0 = all). |
+| `maxMembers`     | number  | `0`                                    | Limit the number of members shown in the **list** (0 = all). The map always shows everyone. |
 
 ## Cloudflare TLS fingerprinting (important)
 
@@ -473,6 +476,11 @@ The most common fixes, in order:
   layout; make sure you're on the current version.
 - **Map is zoomed in too far / cut off** — lower `maxZoom` (e.g. `13`) to keep a
   clustered family from snapping to street level.
+- **Dark map shows an "API key required" watermark** — set `cartoApiKey` to a
+  free key from https://carto.com/basemaps/apikey. CARTO's basemaps are no
+  longer usable anonymously; without a key the tiles still load but are
+  watermarked. Check the log for a `darkMap is enabled but cartoApiKey is not
+  set` warning to confirm this is the cause.
 - **Several members at the same place show one pin** — this is intentional. When
   two or more located members share (almost) the same spot (rounded to ≈11 m),
   the module draws a single round "pie" marker split into a colored wedge per
